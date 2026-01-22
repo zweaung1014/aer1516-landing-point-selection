@@ -1,0 +1,46 @@
+robots:
+  cf_1:
+      enabled: true
+      uri: udp://0.0.0.0:19850
+      initial_position: [0.0, 0.0, 0.0]
+      type: cf_sim
+
+robot_types:
+  cf_sim:
+    motion_capture:
+      enabled: false
+    big_quad: false
+    firmware_params:
+      pid_attitude:
+        roll_kp: 6.0
+        roll_ki: 3.0
+        roll_kd: 0.0
+        pitch_kp: 6.0
+        pitch_ki: 3.0
+        pitch_kd: 0.0
+        yaw_kp: 6.0
+        yaw_ki: 1.0
+        yaw_kd: 0.35
+      pid_rate:
+        roll_kp: 250.0
+        roll_ki: 500.0
+        roll_kd: 2.5
+        pitch_kp: 250.0
+        pitch_ki: 500.0
+        pitch_kd: 2.5
+        yaw_kp: 120.0
+        yaw_ki: 16.7
+        yaw_kd: 0.0
+    firmware_logging:
+      enabled: true
+      default_topics:
+        pose:
+          frequency: 10
+      custom_topics:
+        motorpower:
+          frequency: 100
+          vars: ["motor.m1", "motor.m2", "motor.m3", "motor.m4"]
+        quaternions:
+          frequency: 100
+          vars: ["stateEstimateZ.quat"]
+      

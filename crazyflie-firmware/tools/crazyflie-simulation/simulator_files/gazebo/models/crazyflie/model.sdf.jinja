@@ -1,0 +1,510 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+    <model name="crazyflie_{{ cf_id }}">
+        <pose>0 0 0 0.45 0 0</pose>
+        <static>false</static>
+        <link name="base_link">
+            <inertial>
+                <mass>80.09e-3</mass>
+                <inertia>
+                    <ixx>6.580066e-4</ixx>
+                    <iyy>6.6489975e-4</iyy>
+                    <iyz>8.9406e-7</iyz>
+                    <izz>1.8024598e-4</izz>
+                </inertia>
+            </inertial>
+        <collision name="body_collision">
+            <pose>0 0 0 0 0 0</pose>
+            <geometry>
+            <mesh>
+                <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/robot_frame.dae</uri>
+                <scale>0.001 0.001 0.001</scale>
+            </mesh>
+            </geometry>
+        </collision>
+        <visual name="body_visual">
+            <pose>0 0 0 0 -0 0</pose>
+            <geometry>
+                <mesh>
+                    <scale>0.001 0.001 0.001</scale> <!--1 1 1-->
+                    <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/robot_frame.dae</uri> <!--model://crazyflie/../../../../meshes/collada_files/cf2_assembly.dae-->
+                </mesh>
+            </geometry>
+            <material>
+                <script>
+                    <uri>file://media/materials/scripts/gazebo.material</uri>
+                    <name>Gazebo/CarbonFiber</name> <!--not supported by close enough-->
+                </script>
+            </material>
+        </visual>
+        <sensor name="air_pressure_sensor" type="air_pressure">
+            <topic>/cf_{{ cf_id }}/baro</topic>
+            <always_on>1</always_on>
+            <update_rate>50</update_rate>
+            <air_pressure>
+            <pressure>
+                <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.01</stddev>
+                </noise>
+            </pressure>
+            </air_pressure>
+        </sensor>
+        <sensor name="imu_sensor" type="imu">
+            <topic>/cf_{{ cf_id }}/imu</topic>
+            <always_on>1</always_on>
+            <update_rate>1000</update_rate>
+        </sensor>
+        </link>
+        <link name="m1_prop">
+            <gravity>true</gravity>
+            <self_collide>false</self_collide>
+            <velocity_decay/>
+            <pose>74.25e-3 -74.25e-3 -18.3e-3 0 0 0</pose>
+            <inertial>
+                <pose>0 0 0 0 -0 0</pose>
+                <mass>0.76e-3</mass>
+                <inertia>
+                    <ixx>1.4632e-7</ixx>
+                    <iyy>1.4632e-7</iyy>
+                    <izz>2.9065e-7</izz>
+                    <ixy>-2.6e-10</ixy>
+                </inertia>
+            </inertial>
+            <visual name="m1_visual">
+                <pose>0 0 0 0 -0 0</pose>
+                <geometry>
+                    <mesh>
+                        <scale>0.001 0.001 0.001</scale>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/propeller.dae</uri>
+                    </mesh>
+                </geometry>
+            </visual>
+        </link>
+        <link name="m2_prop">
+            <gravity>true</gravity>
+            <self_collide>false</self_collide>
+            <velocity_decay/>
+            <pose>-74.25e-3 -74.25e-3 -18.3e-3 0 0 0</pose>
+            <inertial>
+                <pose>0 0 0 0 -0 0</pose>
+                <mass>0.76e-3</mass>
+                <inertia>
+                    <ixx>1.4632e-7</ixx>
+                    <iyy>1.4632e-7</iyy>
+                    <izz>2.9065e-7</izz>
+                    <ixy>-2.6e-10</ixy>
+                </inertia>
+            </inertial>
+            <visual name="m2_visual">
+                <pose>0 0 0 0 -0 0</pose>
+                <geometry>
+                    <mesh>
+                        <scale>0.001 0.001 0.001</scale>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/propeller.dae</uri>
+                    </mesh>
+                </geometry>
+            </visual>
+        </link>
+        <link name="m3_prop">
+            <gravity>true</gravity>
+            <self_collide>false</self_collide>
+            <velocity_decay/>
+            <pose >-74.25e-3 74.25e-3 -18.3e-3 0 0 0</pose>
+            <inertial>
+                <pose>0 0 0 0 -0 0</pose>
+                <mass>0.76e-3</mass>
+                <inertia>
+                    <ixx>1.4632e-7</ixx>
+                    <iyy>1.4632e-7</iyy>
+                    <izz>2.9065e-7</izz>
+                    <ixy>-2.6e-10</ixy>
+                </inertia>
+            </inertial>
+            <visual name="m3_visual">
+                <pose>0 0 0 0 -0 0</pose>
+                <geometry>
+                    <mesh>
+                        <scale>0.001 0.001 0.001</scale>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/propeller.dae</uri>
+                    </mesh>
+                </geometry>
+            </visual>
+        </link>
+        <link name="m4_prop">
+            <gravity>true</gravity>
+            <self_collide>false</self_collide>
+            <velocity_decay/>
+            <pose>74.25e-3 74.25e-3 -18.3e-3 0 0 0</pose>
+            <inertial>
+                <pose>0 0 0 0 -0 0</pose>
+                <mass>0.76e-3</mass>
+                <inertia>
+                    <ixx>1.4632e-7</ixx>
+                    <iyy>1.4632e-7</iyy>
+                    <izz>2.9065e-7</izz>
+                    <ixy>-2.6e-10</ixy>
+                </inertia>
+            </inertial>
+            <visual name="m4_visual">
+                <pose>0 0 0 0 -0 0</pose>
+                <geometry>
+                    <mesh>
+                        <scale>0.001 0.001 0.001</scale>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/propeller.dae</uri>
+                    </mesh>
+                </geometry>
+            </visual>
+        </link>
+        <link name="leg">
+            <gravity>true</gravity>
+            <self_collide>false</self_collide>
+            <velocity_decay/>
+            <pose>0 0 -144e-3 0 0 0</pose> 
+            <inertial>
+                <pose>0 0 0 0 -0 0</pose>
+                <mass>12.77e-3</mass>
+                <inertia>
+                    <ixx>6.875793e-5</ixx>
+                    <iyy>6.673207e-5</iyy>
+                    <izz>2.39827e-6</izz>
+                    <ixz>-1.42e-9</ixz>
+                    <iyz>-3e-10</iyz>
+                </inertia>
+            </inertial>
+            <visual name="leg_visual">
+                <pose>0 0 0 0 -0 0</pose>
+                <geometry>
+                    <mesh>
+                        <scale>0.001 0.001 0.001</scale>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/leg.dae</uri>
+                    </mesh>
+                </geometry>
+                <material>
+                    <script>
+                        <uri>file://media/materials/scripts/gazebo.material</uri>
+                        <name>Gazebo/CarbonFiber</name> <!--might need to reconsider the little things-->
+                    </script>
+                </material>
+            </visual>
+            <collision name="leg_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/leg.dae</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="lidar">
+            <pose>0 0 0 0 0 0</pose>
+            <inertial>
+                <mass>265e-3</mass>
+                <inertia>
+                    <ixx>0.00021199639</ixx>
+                    <iyy>0.00021327227</iyy>
+                    <izz>0.00019852281</izz>
+                    <ixy>0.00000118838</ixy>
+                    <ixz>0.00000046117</ixz>
+                    <iyz>0.00000003129</iyz>
+                </inertia>
+            </inertial>
+            <visual name="lidar_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/lidar.dae</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+                <material>
+                    <ambient>0.1 0.1 0.8 1</ambient>
+                    <diffuse>0.1 0.1 0.8 1</diffuse>
+                    <specular>0.5 0.5 0.5 1</specular>
+                    <emissive>0 0 0 1</emissive>
+                </material>
+            </visual>
+            <collision name="lidar_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://crazyflie/../../../../meshes/RISlab_Quadcopter/lidar.dae</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+            <sensor name="lidar_sensor" type="gpu_lidar">
+                <pose>0 0 0.4 0 0 0</pose>
+                <topic>/cf_{{ cf_id }}/lidar</topic>
+                <update_rate>60</update_rate>
+                <ray>
+                    <scan>
+                        <horizontal>
+                            <samples>2048</samples>
+                            <resolution>1</resolution>
+                            <min_angle>-3.14159</min_angle>
+                            <max_angle> 3.14159</max_angle>
+                        </horizontal>
+                        <vertical>
+                            <samples>64</samples>
+                            <resolution>1</resolution>
+                            <min_angle>-0.5</min_angle>
+                            <max_angle> 0.5</max_angle>
+                        </vertical>
+                    </scan>
+                    <range>
+                        <min>0.05</min>
+                        <max>30.0</max>
+                        <resolution>0.005</resolution>
+                    </range>
+                </ray>
+                <always_on>1</always_on>
+                <visualize>true</visualize>
+            </sensor>
+        </link>
+        <link name="camera_link">
+            <pose>0.05 0 0 0 0 0</pose>
+            <inertial>
+                <mass>0.0</mass>  <!-- 0.001 grams - extremely light -->
+                <inertia>
+                    <ixx>0.0</ixx>
+                    <iyy>0.0</iyy>
+                    <izz>0.0</izz>
+                    <ixy>0</ixy>
+                    <ixz>0</ixz>
+                    <iyz>0</iyz>
+                </inertia>
+            </inertial>
+            <visual name="camera_visual">
+                <geometry>
+                    <box>
+                        <size>0.010 0.03 0.03</size>
+                    </box>
+                </geometry>
+                <material>
+                    <ambient>1 0 0 1</ambient>
+                    <diffuse>1 0 0 1</diffuse>
+                </material>
+            </visual>
+            <sensor name="camera" type="camera">
+                <pose> 0 0 0 0 0 0 </pose>
+                <visualize>true</visualize>
+                <update_rate>10</update_rate>
+                <topic>/cf_{{ cf_id }}/camera</topic>
+                <camera>
+                    <horizontal_fov>2.0</horizontal_fov>  <!-- 90 degrees for wider view -->
+                    <image>
+                        <format>R8G8B8</format>
+                        <width>640</width>
+                        <height>480</height>
+                    </image>
+                    <clip>
+                        <near>0.05</near>
+                        <far>8.0</far>
+                    </clip>
+                </camera>
+            </sensor>
+        </link>
+        <link name="camera_link_optical">
+            <pose>0.05 0 0 -1.5708 0 -1.5708</pose>
+            <inertial>
+                <mass>0.0</mass>  <!-- 0.001 grams - extremely light -->
+                <inertia>
+                    <ixx>0.0</ixx>
+                    <iyy>0.0</iyy>
+                    <izz>0.0</izz>
+                    <ixy>0</ixy>
+                    <ixz>0</ixz>
+                    <iyz>0</iyz>
+                </inertia>
+            </inertial>
+        </link>
+        <joint name="body/lidar" type="fixed"> 
+            <parent>base_link</parent>
+            <child>lidar</child>
+        </joint>
+        <joint name="m1_joint" type="revolute">
+            <child>m1_prop</child>
+            <parent>base_link</parent>
+            <axis>
+                <xyz>0 0 1</xyz>
+                <limit>
+                    <lower>-1e+16</lower>
+                    <upper>1e+16</upper>
+                </limit>
+                <dynamics>
+                    <spring_reference>0</spring_reference>
+                    <spring_stiffness>0</spring_stiffness>
+                </dynamics>
+            </axis>
+        </joint>
+        <joint name="m2_joint" type="revolute">
+            <child>m2_prop</child>
+            <parent>base_link</parent>
+            <axis>
+                <xyz>0 0 1</xyz>
+                <limit>
+                    <lower>-1e+16</lower>
+                    <upper>1e+16</upper>
+                </limit>
+                <dynamics>
+                    <spring_reference>0</spring_reference>
+                    <spring_stiffness>0</spring_stiffness>
+                </dynamics>
+            </axis>
+        </joint>
+        <joint name="m3_joint" type="revolute">
+            <child>m3_prop</child>
+            <parent>base_link</parent>
+            <axis>
+                <xyz>0 0 1</xyz>
+                <limit>
+                    <lower>-1e+16</lower>
+                    <upper>1e+16</upper>
+                </limit>
+                <dynamics>
+                    <spring_reference>0</spring_reference>
+                    <spring_stiffness>0</spring_stiffness>
+                </dynamics>
+            </axis>
+        </joint>
+        <joint name="m4_joint" type="revolute">
+            <child>m4_prop</child>
+            <parent>base_link</parent>
+            <axis>
+                <xyz>0 0 1</xyz>
+                <limit>
+                    <lower>-1e+16</lower>
+                    <upper>1e+16</upper>
+                </limit>
+                <dynamics>
+                    <spring_reference>0</spring_reference>
+                    <spring_stiffness>0</spring_stiffness>
+                </dynamics>
+            </axis>
+        </joint>
+        <joint name="body/leg" type="prismatic"> 
+            <parent>base_link</parent>
+            <child>leg</child>
+            <axis>
+                <xyz>0 0 1</xyz> <!-- movement in z-direction -->
+                <limit>
+                    <lower>0</lower>
+                    <upper>200e-3</upper> <!-- was 140.5e-3, can try with 200 mm to make sure it doesn't hit limit-->
+                </limit>
+                <dynamics>
+                    <spring_reference>-30e-3</spring_reference> <!-- pre-stretch 30mm -->
+                    <spring_stiffness>1355</spring_stiffness> <!-- 1355 N/m -->
+                    <damping>0.03</damping> <!-- kd damping coefficient 0.03 Ns/m -->
+                </dynamics>
+            </axis>
+        </joint>
+        <joint name="camera_joint" type="fixed">
+            <parent>base_link</parent>
+            <child>camera_link</child>
+        </joint>
+        <joint name="camera_optical_joint" type="fixed">
+            <parent>camera_link</parent>
+            <child>camera_link_optical</child>
+        </joint>
+        <plugin
+            filename="gz-sim-multicopter-motor-model-system"
+            name="gz::sim::systems::MulticopterMotorModel">
+            <robotNamespace>cf_{{ cf_id }}</robotNamespace>
+            <jointName>m1_joint</jointName>
+            <linkName>m1_prop</linkName>
+            <turningDirection>ccw</turningDirection>
+            <timeConstantUp>0.0125</timeConstantUp>
+            <timeConstantDown>0.025</timeConstantDown>
+            <maxRotVelocity>3052</maxRotVelocity>
+            <motorConstant>28e-8</motorConstant> <!-- 1.7965e-8 -->
+            <momentConstant>0.005964552</momentConstant>
+            <commandSubTopic>command/motor_speed</commandSubTopic>
+            <actuator_number>0</actuator_number>
+            <rotorDragCoefficient>9.1785e-7</rotorDragCoefficient>
+            <rollingMomentCoefficient>0.0000001</rollingMomentCoefficient>
+            <motorSpeedPubTopic>motor_speed/0</motorSpeedPubTopic>
+            <rotorVelocitySlowdownSim>70</rotorVelocitySlowdownSim>
+            <motorType>velocity</motorType>
+        </plugin>
+        <plugin
+            filename="gz-sim-multicopter-motor-model-system"
+            name="gz::sim::systems::MulticopterMotorModel">
+            <robotNamespace>cf_{{ cf_id }}</robotNamespace>
+            <jointName>m2_joint</jointName>
+            <linkName>m2_prop</linkName>
+            <turningDirection>cw</turningDirection>
+            <timeConstantUp>0.0125</timeConstantUp>
+            <timeConstantDown>0.025</timeConstantDown>
+            <maxRotVelocity>3052</maxRotVelocity>
+            <motorConstant>28e-8</motorConstant>
+            <momentConstant>0.005964552</momentConstant>
+            <commandSubTopic>command/motor_speed</commandSubTopic>
+            <actuator_number>1</actuator_number>
+            <rotorDragCoefficient>9.1785e-7</rotorDragCoefficient>
+            <rollingMomentCoefficient>0.0000001</rollingMomentCoefficient>
+            <motorSpeedPubTopic>motor_speed/1</motorSpeedPubTopic>
+            <rotorVelocitySlowdownSim>70</rotorVelocitySlowdownSim>
+            <motorType>velocity</motorType>
+        </plugin>
+        <plugin
+            filename="gz-sim-multicopter-motor-model-system"
+            name="gz::sim::systems::MulticopterMotorModel">
+            <robotNamespace>cf_{{ cf_id }}</robotNamespace>
+            <jointName>m3_joint</jointName>
+            <linkName>m3_prop</linkName>
+            <turningDirection>ccw</turningDirection>
+            <timeConstantUp>0.0125</timeConstantUp>
+            <timeConstantDown>0.025</timeConstantDown>
+            <maxRotVelocity>3052</maxRotVelocity>
+            <motorConstant>28e-8</motorConstant>
+            <momentConstant>0.005964552</momentConstant>
+            <commandSubTopic>command/motor_speed</commandSubTopic>
+            <actuator_number>2</actuator_number>
+            <rotorDragCoefficient>9.1785e-7</rotorDragCoefficient>
+            <rollingMomentCoefficient>0.0000001</rollingMomentCoefficient>
+            <motorSpeedPubTopic>motor_speed/2</motorSpeedPubTopic>
+            <rotorVelocitySlowdownSim>70</rotorVelocitySlowdownSim>
+            <motorType>velocity</motorType>
+        </plugin>
+        <plugin
+            filename="gz-sim-multicopter-motor-model-system"
+            name="gz::sim::systems::MulticopterMotorModel">
+            <robotNamespace>cf_{{ cf_id }}</robotNamespace>
+            <jointName>m4_joint</jointName>
+            <linkName>m4_prop</linkName>
+            <turningDirection>cw</turningDirection>
+            <timeConstantUp>0.0125</timeConstantUp>
+            <timeConstantDown>0.025</timeConstantDown>
+            <maxRotVelocity>3052</maxRotVelocity>
+            <motorConstant>28e-8</motorConstant>
+            <momentConstant>0.005964552</momentConstant>
+            <commandSubTopic>command/motor_speed</commandSubTopic>
+            <actuator_number>3</actuator_number>
+            <rotorDragCoefficient>9.1785e-7</rotorDragCoefficient>
+            <rollingMomentCoefficient>0.000001</rollingMomentCoefficient>
+            <motorSpeedPubTopic>motor_speed/3</motorSpeedPubTopic>
+            <rotorVelocitySlowdownSim>70</rotorVelocitySlowdownSim>
+            <motorType>velocity</motorType>
+        </plugin> 
+        <plugin
+            filename="gz-sim-odometry-publisher-system"
+            name="gz::sim::systems::OdometryPublisher">
+            <dimensions>3</dimensions>
+            <odom_publish_frequency>200</odom_publish_frequency>
+            <odom_topic>/cf_{{ cf_id }}/odom</odom_topic>
+        </plugin>
+        <plugin
+            filename="gz_crazysim_plugin"
+            name="crazyflie_interface::GzCrazyflieInterface">
+            <imuSubTopic>/imu</imuSubTopic>
+            <magSubTopic>/mag</magSubTopic>
+            <baroSubTopic>/baro</baroSubTopic>
+            <cffirm_addr>INADDR_ANY</cffirm_addr>
+            <cffirm_port>{{ cffirm_udp_port }}</cffirm_port>
+            <cflib_addr>INADDR_ANY</cflib_addr>
+            <cflib_port>{{ cflib_udp_port }}</cflib_port>
+            <cfPrefix>{{ cf_name }}</cfPrefix>
+            <cfId>{{ cf_id }}</cfId>
+        </plugin>
+    </model>
+</sdf>
+

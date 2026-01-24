@@ -157,15 +157,13 @@ public:
     declare_parameter<double>("map.resolution", 0.05);
     declare_parameter<double>("map.z_min", 0.0);
     declare_parameter<double>("map.z_max", 1.5);
-    declare_parameter<double>("start.x", 0.0);
-    declare_parameter<double>("start.y", 0.0);
     declare_parameter<double>("goal.x", 2.0);
     declare_parameter<double>("goal.y", 2.0);
     declare_parameter<double>("path.z", 0.8);
     declare_parameter<double>("planner.solve_time", 1.0);
     declare_parameter<int>("planner.interpolate", 200);
     // Robot outer radius (meters). Derived from model.sdf.jinja: sqrt(2)*(74.25 mm) ≈ 0.105 m
-    declare_parameter<double>("robot.radius", 0.105);
+    declare_parameter<double>("robot.radius", 0.2); //was 0.105
 
     // Load parameter values
     get_parameter("map.min_x", map_min_x_);
@@ -175,8 +173,6 @@ public:
     get_parameter("map.resolution", map_resolution_);
     get_parameter("map.z_min", z_min_);
     get_parameter("map.z_max", z_max_);
-    get_parameter("start.x", start_x_);
-    get_parameter("start.y", start_y_);
     get_parameter("goal.x", goal_x_);
     get_parameter("goal.y", goal_y_);
     get_parameter("path.z", path_z_);
@@ -199,7 +195,7 @@ public:
 
       // Subscribe to robot pose to plan from the current position instead of a fixed origin
       start_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/cf_1/pose", 10,
+        "/cf_1/pose", rclcpp::SensorDataQoS(),
         std::bind(&RRTStarPlannerNode::startPoseCallback, this, std::placeholders::_1));
 
     plan_timer_ = create_wall_timer(
@@ -299,9 +295,14 @@ private:
     si->setup();
 
     ob::ScopedState<> start(space);
-    // Use the latest robot pose as the start if available; otherwise fall back to parameters
-    const double sx = have_current_start_ ? current_start_x_ : start_x_;
-    const double sy = have_current_start_ ? current_start_y_ : start_y_;
+    // Require live robot pose for start; no parameter fallback
+    if (!have_current_start_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "No live robot pose; skipping plan.");
+      return;
+    }
+    const double sx = current_start_x_;
+    const double sy = current_start_y_;
     start[0] = sx;
     start[1] = sy;
     ob::ScopedState<> goal(space);
@@ -340,15 +341,11 @@ private:
 
       std::vector<geometry_msgs::msg::Point> points;
       points.reserve(states.size());
-      // Offset the published trajectory by the robot's current pose at replan time.
-      // This ensures the first waypoint matches the robot location instead of (0,0).
-      const double offset_x = have_current_start_ ? current_start_x_ : 0.0;
-      const double offset_y = have_current_start_ ? current_start_y_ : 0.0;
       for (const auto &st : states) {
         const auto *rv = st->as<ob::RealVectorStateSpace::StateType>();
         geometry_msgs::msg::Point p;
-        p.x = rv->values[0] + offset_x;
-        p.y = rv->values[1] + offset_y;
+        p.x = rv->values[0];
+        p.y = rv->values[1];
         p.z = path_z_;
         points.push_back(p);
       }
@@ -459,3 +456,4 @@ int main(int argc, char **argv) {
   rclcpp::shutdown();
   return 0;
 }
+

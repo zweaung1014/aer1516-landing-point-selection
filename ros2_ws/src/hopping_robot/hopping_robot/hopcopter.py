@@ -141,7 +141,7 @@ class hopcopter(Node):
         self.leg_length = 0.4
         self.jumping_counter = 0
         self.jumping_height_record = 0.5  # CoM vertical movement distance
-        self.powered_climbing_thrust = 14300 # might need to tune this, was 15000
+        self.powered_climbing_thrust = 15000 # might need to tune this, was 15000
         self.ready_to_drop = True
 
         # Initiate ROS2 publisher
@@ -283,33 +283,9 @@ class hopcopter(Node):
                     while not self.trajectory_queue.empty():
                         self.trajectory_queue.get()
 
-                    # Build full trajectory list
-                    traj_points = [(float(p.x), float(p.y), float(p.z)) for p in msg.points]
-
-                    # Determine robot's current position for selecting a starting waypoint
-                    # Prefer Gazebo ground-truth if available; otherwise fall back to firmware pose
-                    if self.current_pos is not None:
-                        cur_x_fw = float(self.current_pos.x)
-                        cur_y_fw = float(self.current_pos.y)
-                    else:
-                        cur_x_fw = None
-                        cur_y_fw = None
-
-                    cur_x = float(self.pos_x) if self.pos_x is not None else cur_x_fw
-                    cur_y = float(self.pos_y) if self.pos_y is not None else cur_y_fw
-
-                    # If we have a usable current position, choose the closest waypoint
-                    start_index = 0
-                    if cur_x is not None and cur_y is not None:
-                        min_d = float('inf')
-                        for i, (wx, wy, wz) in enumerate(traj_points):
-                            d = math.sqrt((wx - cur_x)**2 + (wy - cur_y)**2)
-                            if d < min_d:
-                                min_d = d
-                                start_index = i
-
-                    # Queue trajectory from the chosen start_index onward
-                    for waypoint in traj_points[start_index:]:
+                    # Queue all trajectory points
+                    for point in msg.points:
+                        waypoint = (float(point.x), float(point.y), float(point.z))
                         self.trajectory_queue.put(waypoint)
 
                     # Mark that we've received our first trajectory
@@ -658,5 +634,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 

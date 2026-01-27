@@ -161,7 +161,7 @@ public:
     declare_parameter<double>("goal.y", 2.0);
     declare_parameter<double>("path.z", 0.8);
     declare_parameter<double>("planner.solve_time", 1.0);
-    declare_parameter<int>("planner.interpolate", 200);
+    declare_parameter<double>("planner.point_spacing", 0.5);
     // Robot outer radius (meters). Derived from model.sdf.jinja: sqrt(2)*(74.25 mm) ≈ 0.105 m
     declare_parameter<double>("robot.radius", 0.2); //was 0.105
 
@@ -177,7 +177,7 @@ public:
     get_parameter("goal.y", goal_y_);
     get_parameter("path.z", path_z_);
     get_parameter("planner.solve_time", solve_time_);
-    get_parameter("planner.interpolate", n_interp_);
+    get_parameter("planner.point_spacing", point_spacing_);
     get_parameter("robot.radius", robot_radius_);
 
     grid_ = std::make_unique<GridMap>(map_min_x_, map_max_x_, map_min_y_, map_max_y_, map_resolution_);
@@ -199,7 +199,7 @@ public:
         std::bind(&RRTStarPlannerNode::startPoseCallback, this, std::placeholders::_1));
 
     plan_timer_ = create_wall_timer(
-      std::chrono::milliseconds(1000), //was 1000 ms
+      std::chrono::milliseconds(30000), //was 1000 ms
       std::bind(&RRTStarPlannerNode::tryPlanAndPublish, this));
 
     RCLCPP_INFO(get_logger(), "RRT* planner node initialized.");
@@ -327,8 +327,16 @@ private:
         RCLCPP_WARN(get_logger(), "Solution path is not geometric; skipping publish.");
         return;
       }
+      
+      // Calculate path length for distance-based interpolation
+      double path_length = gpath->length();
+      int num_points = static_cast<int>(std::ceil(path_length / point_spacing_));
+      num_points = std::max(2, num_points);  // Ensure at least 2 points
+      
       try {
-        gpath->interpolate(n_interp_);
+        gpath->interpolate(num_points);
+        RCLCPP_INFO(get_logger(), "Path length: %.2fm with %d points (avg spacing: %.3fm)", 
+                   path_length, num_points, path_length/num_points);
       } catch (...) {
         // ignore interpolation errors
       }
@@ -421,7 +429,7 @@ private:
   double goal_y_{};
   double path_z_{};
   double solve_time_{};
-  int n_interp_{};
+  double point_spacing_{};
   double robot_radius_{};
   // Live start pose
   bool have_current_start_{false};

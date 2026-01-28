@@ -181,11 +181,24 @@ class hopcopter(Node):
         self.desired_z = 0.8  # Always keep altitude command at 0.8 m
         self.desired_yaw = 0.0
         
+        # Trajectory start position tracking for follower-gating
+        self.trajectory_start_x = 0.0
+        self.trajectory_start_y = 0.0
+        self.trajectory_start_received = False
+        
         # Subscribe to trajectory from OMPL RRT* planner
         self.trajectory_sub = self.create_subscription(
             Marker,
             '/ompl_rrt_star_trajectory',
             self.trajectory_callback,
+            10
+        )
+        
+        # Subscribe to trajectory start position from RRT* planner for follower-gating
+        self.traj_start_sub = self.create_subscription(
+            PoseStamped,
+            '/trajectory_start_position',
+            self.trajectory_start_callback,
             10
         )
 
@@ -267,6 +280,16 @@ class hopcopter(Node):
         # optional: timestamp in seconds (float)
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
+    def trajectory_start_callback(self, msg: PoseStamped) -> None:
+        """Handle trajectory start position from RRT* planner for follower-gating"""
+        try:
+            self.trajectory_start_x = msg.pose.position.x
+            self.trajectory_start_y = msg.pose.position.y
+            self.trajectory_start_received = True
+            self.get_logger().info(f"Received trajectory start position: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f})")
+        except Exception as e:
+            self.get_logger().error(f"Error in trajectory_start_callback: {e}")
+
     def trajectory_callback(self, msg: Marker) -> None:
         """Handle incoming trajectory messages from /ompl_rrt_star_trajectory"""
         try:
@@ -279,12 +302,15 @@ class hopcopter(Node):
 
                 # Require more than 1 point to treat it as a trajectory
                 if len(msg.points) > 1:
+                    # Apply follower-gating to filter out "behind" points
+                    filtered_points = self.apply_follower_gating(msg.points)
+                    
                     # Clear existing trajectory
                     while not self.trajectory_queue.empty():
                         self.trajectory_queue.get()
 
-                    # Queue all trajectory points
-                    for point in msg.points:
+                    # Queue filtered trajectory points
+                    for point in filtered_points:
                         waypoint = (float(point.x), float(point.y), float(point.z))
                         self.trajectory_queue.put(waypoint)
 
@@ -315,6 +341,49 @@ class hopcopter(Node):
                 
         except Exception as e:
             self.get_logger().error(f"Error in trajectory_callback: {e}")
+    
+    def apply_follower_gating(self, trajectory_points):
+        """Filter trajectory points to remove those behind current robot position"""
+        if not self.trajectory_start_received or len(trajectory_points) < 2:
+            return trajectory_points
+            
+        # Calculate trajectory direction vector (from start toward goal)
+        start_point = trajectory_points[0] 
+        end_point = trajectory_points[-1]
+        traj_direction_x = end_point.x - start_point.x
+        traj_direction_y = end_point.y - start_point.y
+        
+        # Normalize direction vector
+        traj_length = math.sqrt(traj_direction_x**2 + traj_direction_y**2)
+        if traj_length < 1e-6:  # Avoid division by zero
+            return trajectory_points
+            
+        traj_dir_norm_x = traj_direction_x / traj_length
+        traj_dir_norm_y = traj_direction_y / traj_length
+        
+        # Current robot position when trajectory is ready
+        current_robot_x = self.pos_x
+        current_robot_y = self.pos_y
+        
+        filtered_points = []
+        for point in trajectory_points:
+            # Vector from current robot position to this trajectory point
+            to_point_x = point.x - current_robot_x
+            to_point_y = point.y - current_robot_y
+            
+            # Dot product with trajectory direction (positive = ahead, negative = behind)
+            dot_product = to_point_x * traj_dir_norm_x + to_point_y * traj_dir_norm_y
+            
+            # Keep points that are ahead of current robot position (with small tolerance)
+            if dot_product >= -0.1:  # Small negative tolerance for numerical stability
+                filtered_points.append(point)
+        
+        # Ensure we always have at least one point
+        if not filtered_points and trajectory_points:
+            filtered_points = [trajectory_points[0]]
+            
+        self.get_logger().info(f"Follower-gating: filtered {len(trajectory_points)} -> {len(filtered_points)} points")
+        return filtered_points
     
     def _load_next_waypoint(self):
         """Load the next waypoint from the queue as the current goal"""

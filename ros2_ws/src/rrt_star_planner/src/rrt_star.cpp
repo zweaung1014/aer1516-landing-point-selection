@@ -184,6 +184,7 @@ public:
 
     traj_pub_ = create_publisher<visualization_msgs::msg::Marker>("/ompl_rrt_star_trajectory", 10);
     grid_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>("/rrt_star_grid", 10);
+    traj_start_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("/trajectory_start_position", 10);
 
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       "/cf_0/lidar/points", rclcpp::SensorDataQoS(),
@@ -359,10 +360,30 @@ private:
       }
 
       publishMarkerPath(points);
+      publishTrajectoryStartPosition();
       RCLCPP_INFO(get_logger(), "Published trajectory with %zu points (id=%d).", points.size(), PATH_MARKER_ID);
     } else {
       RCLCPP_WARN(get_logger(), "RRT* failed to find a solution.");
     }
+  }
+
+  // Publishes current robot position when trajectory is ready for follower-gating
+  void publishTrajectoryStartPosition() {
+    if (!have_current_start_) {
+      return;
+    }
+    
+    geometry_msgs::msg::PoseStamped start_msg;
+    start_msg.header.frame_id = "world";
+    start_msg.header.stamp = now();
+    start_msg.pose.position.x = current_start_x_;
+    start_msg.pose.position.y = current_start_y_;
+    start_msg.pose.position.z = path_z_;
+    start_msg.pose.orientation.w = 1.0;
+    
+    traj_start_pub_->publish(start_msg);
+    RCLCPP_INFO(get_logger(), "Published trajectory start position: (%.3f, %.3f)", 
+                current_start_x_, current_start_y_);
   }
 
   // Publishes the planned path as a Marker: First deletes the previous marker, then adds a new SPHERE_LIST with the points.
@@ -447,6 +468,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr start_pose_sub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr traj_pub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr traj_start_pub_;
   rclcpp::TimerBase::SharedPtr plan_timer_;
 
   // Grid

@@ -167,13 +167,13 @@
     <!-- Positions chosen to avoid the ramp at x~4,y~-1 (approx. excluded box x:[2.5,5.5], y:[-1.5,-0.5]) -->
     <model name="pole_1">
       <static>true</static>
-      <pose>3 1.8 0.6 0 0 0</pose>
+      <pose>3 1.8 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -185,7 +185,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -194,13 +194,13 @@
 
     <model name="pole_2">
       <static>true</static>
-      <pose>1.7 1.8 0.6 0 0 0</pose>
+      <pose>1.7 1.8 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -212,7 +212,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -221,13 +221,13 @@
 
     <model name="pole_3">
       <static>true</static>
-      <pose>0.5 -2.0 0.6 0 0 0</pose>
+      <pose>0.5 -2.0 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -239,7 +239,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -248,13 +248,13 @@
 
     <model name="pole_4">
       <static>true</static>
-      <pose>3.5 2.5 0.6 0 0 0</pose>
+      <pose>3.5 2.5 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -266,7 +266,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -275,13 +275,13 @@
 
     <model name="pole_5">
       <static>true</static>
-      <pose>6.0 -2.5 0.6 0 0 0</pose>
+      <pose>6.0 -2.5 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -293,7 +293,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -302,13 +302,13 @@
 
     <model name="pole_6">
       <static>true</static>
-      <pose>5.8 1.8 0.6 0 0 0</pose>
+      <pose>5.8 1.8 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -320,7 +320,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -329,13 +329,13 @@
 
     <model name="pole_7">
       <static>true</static>
-      <pose>1.6 0.5 0.6 0 0 0</pose>
+      <pose>1.6 0.5 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -347,7 +347,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -356,13 +356,13 @@
 
     <model name="pole_8">
       <static>true</static>
-      <pose>3.2 0.5 0.6 0 0 0</pose>
+      <pose>3.2 0.5 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -374,7 +374,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>
@@ -382,13 +382,13 @@
     </model>
     <model name="pole_10">
       <static>true</static>
-      <pose>0.7 0 0.6 0 0 0</pose>
+      <pose>0.7 0 0.78 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
           <material>
@@ -400,7 +400,7 @@
           <geometry>
             <cylinder>
               <radius>0.15</radius>
-              <length>1.2</length>
+              <length>1.56</length>
             </cylinder>
           </geometry>
         </collision>

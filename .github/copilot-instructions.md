@@ -18,6 +18,14 @@
   - Verify parameter meanings (step size, range, goal bias, rewiring radius, etc.)
   - Cite the relevant OMPL documentation page or section
 
+### Visualization (RViz2)
+- For RViz2-related visualization code or debugging (e.g., point clouds, paths, markers, TF):
+  - Consult **RViz2 documentation via Context7**
+  - Verify message types (`sensor_msgs/PointCloud2`, `nav_msgs/Path`, `visualization_msgs/Marker`)
+  - Verify frame conventions, `frame_id` usage, and TF availability
+  - Verify marker namespaces, lifetimes, and update behavior
+  - Cite the relevant RViz2 documentation page or section when behavior is non-obvious
+
 ### Crazyflie Platform & Control
 - For Crazyflie-related code (firmware, control, dynamics, messaging):
   - Base assumptions on the **Crazyflie platform constraints** (mass, thrust limits, onboard compute, communication latency)

@@ -171,8 +171,8 @@ public:
     declare_parameter<double>("planner.solve_time", 1.0);
     declare_parameter<double>("planner.point_spacing", 0.5);
     // Robot outer radius (meters). Derived from model.sdf.jinja: sqrt(2)*(74.25 mm) ≈ 0.105 m
-    declare_parameter<double>("robot.radius", 0.15); //was 0.105
-
+    declare_parameter<double>("robot.radius", 0.2); //was 0.105    // Self-collision filtering radius to prevent robot position being marked occupied
+    declare_parameter<double>("robot.self_collision_radius", 0.15);
     // Load parameter values
     get_parameter("map.min_x", map_min_x_);
     get_parameter("map.max_x", map_max_x_);
@@ -187,6 +187,7 @@ public:
     get_parameter("planner.solve_time", solve_time_);
     get_parameter("planner.point_spacing", point_spacing_);
     get_parameter("robot.radius", robot_radius_);
+    get_parameter("robot.self_collision_radius", self_collision_radius_);
 
     grid_ = std::make_unique<GridMap>(map_min_x_, map_max_x_, map_min_y_, map_max_y_, map_resolution_);
 
@@ -257,6 +258,17 @@ private:
         point_in.point.z = z;
         
         tf2::doTransform(point_in, point_out, transform);
+        
+        // Self-collision filtering: Skip points too close to robot's current position
+        if (have_current_start_) {
+          double dx = point_out.point.x - current_start_x_;
+          double dy = point_out.point.y - current_start_y_;
+          double distance_to_robot = std::sqrt(dx*dx + dy*dy);
+          
+          if (distance_to_robot < self_collision_radius_) {
+            continue;  // Skip this point - too close to robot
+          }
+        }
         
         // Filter by z-band and mark occupied in world coordinates
         if (point_out.point.z >= z_min_ && point_out.point.z <= z_max_) {
@@ -491,6 +503,7 @@ private:
   double solve_time_{};
   double point_spacing_{};
   double robot_radius_{};
+  double self_collision_radius_{};
   // Live start pose
   bool have_current_start_{false};
   double current_start_x_{};

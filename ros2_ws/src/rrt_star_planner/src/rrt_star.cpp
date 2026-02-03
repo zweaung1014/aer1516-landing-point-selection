@@ -20,6 +20,13 @@
 #include "visualization_msgs/msg/marker.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 
+// TF2 headers for coordinate transforms
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "geometry_msgs/msg/point_stamped.hpp"
+
 // OMPL headers
 #include "ompl/base/SpaceInformation.h"
 #include "ompl/base/ProblemDefinition.h"
@@ -182,6 +189,10 @@ public:
 
     grid_ = std::make_unique<GridMap>(map_min_x_, map_max_x_, map_min_y_, map_max_y_, map_resolution_);
 
+    // TF2 setup for coordinate transforms
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
     traj_pub_ = create_publisher<visualization_msgs::msg::Marker>("/ompl_rrt_star_trajectory", 10);
     grid_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>("/rrt_star_grid", 10);
     traj_start_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("/trajectory_start_position", 10);
@@ -207,10 +218,22 @@ public:
   }
 
 private:
-  // Callback for LiDAR PointCloud2 messages: Clears the grid, filters points by z-band, and marks occupied cells.
+  // Callback for LiDAR PointCloud2 messages: Transforms points to world frame, filters by z-band, and marks occupied cells.
   void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     try {
       grid_->clear();
+
+      // Check if transform is available from sensor frame to world frame
+      if (!tf_buffer_->canTransform("world", msg->header.frame_id, msg->header.stamp, 
+                                   std::chrono::milliseconds(100))) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                           "Cannot transform from %s to world", msg->header.frame_id.c_str());
+        return;
+      }
+
+      // Get transform from sensor frame to world frame
+      geometry_msgs::msg::TransformStamped transform;
+      transform = tf_buffer_->lookupTransform("world", msg->header.frame_id, msg->header.stamp);
 
       sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
       sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
@@ -220,11 +243,23 @@ private:
         const float x = *iter_x;
         const float y = *iter_y;
         const float z = *iter_z;
+        
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
           continue;
         }
-        if (z >= z_min_ && z <= z_max_) {
-          grid_->markOccupied(static_cast<double>(x), static_cast<double>(y));
+
+        // Transform point from sensor frame to world frame
+        geometry_msgs::msg::PointStamped point_in, point_out;
+        point_in.header = msg->header;
+        point_in.point.x = x;
+        point_in.point.y = y;
+        point_in.point.z = z;
+        
+        tf2::doTransform(point_in, point_out, transform);
+        
+        // Filter by z-band and mark occupied in world coordinates
+        if (point_out.point.z >= z_min_ && point_out.point.z <= z_max_) {
+          grid_->markOccupied(point_out.point.x, point_out.point.y);
         }
       }
 
@@ -233,10 +268,13 @@ private:
 
       have_grid_ = true;
       latest_stamp_ = msg->header.stamp;
-      RCLCPP_DEBUG(get_logger(), "Updated occupancy grid from LiDAR points.");
+      RCLCPP_DEBUG(get_logger(), "Updated occupancy grid from transformed LiDAR points.");
 
       // Publish debug OccupancyGrid for visualization in RViz
       publishOccupancyGrid();
+      
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_ERROR(get_logger(), "TF2 transform failed: %s", ex.what());
     } catch (const std::exception &e) {
       RCLCPP_ERROR(get_logger(), "Error processing PointCloud2: %s", e.what());
     }
@@ -473,6 +511,10 @@ private:
 
   // Grid
   std::unique_ptr<GridMap> grid_;
+
+  // TF2 for coordinate transforms
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // Marker id constant
   static constexpr int PATH_MARKER_ID = 400;

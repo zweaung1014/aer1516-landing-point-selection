@@ -12,6 +12,8 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(ompl REQUIRED)
 
 add_executable(rrt_star src/rrt_star.cpp)
@@ -29,6 +31,8 @@ ament_target_dependencies(rrt_star
   geometry_msgs
   visualization_msgs
   nav_msgs
+  tf2_ros
+  tf2_geometry_msgs
 )
 target_link_libraries(rrt_star ${OMPL_LIBRARIES})
 

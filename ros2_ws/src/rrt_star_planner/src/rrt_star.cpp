@@ -212,7 +212,7 @@ public:
         std::bind(&RRTStarPlannerNode::startPoseCallback, this, std::placeholders::_1));
 
     plan_timer_ = create_wall_timer(
-      std::chrono::milliseconds(30000), //was 1000 ms
+      std::chrono::milliseconds(1000), //was 1000 ms
       std::bind(&RRTStarPlannerNode::tryPlanAndPublish, this));
 
     RCLCPP_INFO(get_logger(), "RRT* planner node initialized.");

@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+import math
 
 import tf2_ros
 from geometry_msgs.msg import PoseStamped, TransformStamped
@@ -77,16 +78,20 @@ class RobotTFBroadcaster(Node):
             lidar_transform.header.frame_id = 'crazyflie_0/base_link'
             lidar_transform.child_frame_id = 'crazyflie_0/lidar/lidar_sensor'
             
-            # LiDAR sensor offset from SDF file: 0.4m above base_link
+            # LiDAR sensor offset and rotation from SDF file: 
+            # Translation: 0.4m above base_link
+            # Rotation: 52 degrees forward tilt (0.9076 rad around Y-axis)
             lidar_transform.transform.translation.x = 0.0
             lidar_transform.transform.translation.y = 0.0
             lidar_transform.transform.translation.z = 0.4
             
-            # No rotation (aligned with robot)
+            # 52-degree forward tilt: quaternion for rotation around Y-axis
+            # q = [0, sin(θ/2), 0, cos(θ/2)] where θ = 0.9076 rad
+            half_angle = 0.9076 / 2.0  # 52 degrees / 2 in radians
             lidar_transform.transform.rotation.x = 0.0
-            lidar_transform.transform.rotation.y = 0.0
+            lidar_transform.transform.rotation.y = math.sin(half_angle)  # ≈ 0.4383
             lidar_transform.transform.rotation.z = 0.0
-            lidar_transform.transform.rotation.w = 1.0
+            lidar_transform.transform.rotation.w = math.cos(half_angle)  # ≈ 0.8988
             
             # Broadcast static transform
             self.static_tf_broadcaster.sendTransform(lidar_transform)

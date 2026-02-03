@@ -171,7 +171,7 @@ public:
     declare_parameter<double>("planner.solve_time", 1.0);
     declare_parameter<double>("planner.point_spacing", 0.5);
     // Robot outer radius (meters). Derived from model.sdf.jinja: sqrt(2)*(74.25 mm) ≈ 0.105 m
-    declare_parameter<double>("robot.radius", 0.25); //was 0.105
+    declare_parameter<double>("robot.radius", 0.15); //was 0.105
 
     // Load parameter values
     get_parameter("map.min_x", map_min_x_);

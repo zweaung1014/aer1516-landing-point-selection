@@ -24,6 +24,7 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "tf2/time.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 
@@ -224,7 +225,7 @@ private:
       grid_->clear();
 
       // Check if transform is available from sensor frame to world frame
-      if (!tf_buffer_->canTransform("world", msg->header.frame_id, msg->header.stamp, 
+      if (!tf_buffer_->canTransform("world", msg->header.frame_id, tf2::TimePointZero, 
                                    std::chrono::milliseconds(100))) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                            "Cannot transform from %s to world", msg->header.frame_id.c_str());
@@ -233,7 +234,7 @@ private:
 
       // Get transform from sensor frame to world frame
       geometry_msgs::msg::TransformStamped transform;
-      transform = tf_buffer_->lookupTransform("world", msg->header.frame_id, msg->header.stamp);
+      transform = tf_buffer_->lookupTransform("world", msg->header.frame_id, tf2::TimePointZero);
 
       sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
       sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");

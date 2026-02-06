@@ -430,16 +430,26 @@ class hopcopter(Node):
         The waypoint index to modify is encoded in header.stamp.sec (index 0, 1, etc.)
         """
         try:
+            receive_time = time.time()
             waypoint_index = msg.header.stamp.sec  # Index of waypoint to adjust
             
             if waypoint_index < len(self.waypoint_list):
                 old_wp = self.waypoint_list[waypoint_index]
                 new_wp = (msg.point.x, msg.point.y, old_wp[2])  # Keep original z
                 self.waypoint_list[waypoint_index] = new_wp
-                self.get_logger().info(
-                    f"Local planner adjusted waypoint[{waypoint_index}]: "
-                    f"({old_wp[0]:.3f}, {old_wp[1]:.3f}) -> ({new_wp[0]:.3f}, {new_wp[1]:.3f})"
-                )
+                
+                # DEBUG: timing info
+                if hasattr(self, 'state3_start_time'):
+                    time_since_state3 = (receive_time - self.state3_start_time) * 1000
+                    self.get_logger().info(
+                        f"[TIMING] Adjusted waypoint received at {receive_time:.6f} ({time_since_state3:.1f}ms after state3 start) | "
+                        f"waypoint[{waypoint_index}]: ({old_wp[0]:.3f}, {old_wp[1]:.3f}) -> ({new_wp[0]:.3f}, {new_wp[1]:.3f})"
+                    )
+                else:
+                    self.get_logger().info(
+                        f"Local planner adjusted waypoint[{waypoint_index}]: "
+                        f"({old_wp[0]:.3f}, {old_wp[1]:.3f}) -> ({new_wp[0]:.3f}, {new_wp[1]:.3f})"
+                    )
             else:
                 self.get_logger().warn(
                     f"Local planner tried to adjust waypoint[{waypoint_index}] but list only has {len(self.waypoint_list)} items"
@@ -661,11 +671,24 @@ class hopcopter(Node):
             # Detect transition TO state 3 (takeoff) - publish queue state once
             if self.prev_jumping_state != 3 and self.JSTO.jumping_state == 3:
                 self.queue_state_published_this_cycle = False  # Reset flag for new jump cycle
+                self.state3_start_time = time.time()  # DEBUG: record state 3 start time
+                self.get_logger().info(f"[TIMING] State 3 START at {self.state3_start_time:.6f}")
+            
+            # Detect transition FROM state 3 TO state 1 (apex reached, start falling)
+            if self.prev_jumping_state == 3 and self.JSTO.jumping_state == 1:
+                state1_start_time = time.time()
+                if hasattr(self, 'state3_start_time'):
+                    state3_duration = state1_start_time - self.state3_start_time
+                    self.get_logger().info(f"[TIMING] State 1 START at {state1_start_time:.6f} (state3 lasted {state3_duration*1000:.1f}ms)")
             
             # Publish queue state once at the START of state 3
             if self.JSTO.jumping_state == 3 and not self.queue_state_published_this_cycle:
+                queue_pub_time = time.time()
                 self._publish_queue_state()
                 self.queue_state_published_this_cycle = True
+                if hasattr(self, 'state3_start_time'):
+                    delay_from_state3 = (queue_pub_time - self.state3_start_time) * 1000
+                    self.get_logger().info(f"[TIMING] Queue state published at {queue_pub_time:.6f} ({delay_from_state3:.1f}ms after state3 start)")
             
             # Track state for transition detection
             self.prev_jumping_state = self.JSTO.jumping_state

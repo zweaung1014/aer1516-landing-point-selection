@@ -37,6 +37,7 @@
 #include <cmath>
 #include <vector>
 #include <memory>
+#include <chrono>
 
 class LocalPlanner : public rclcpp::Node
 {
@@ -117,6 +118,9 @@ private:
     geometry_msgs::msg::Point last_adjusted_waypoint_original_;
     bool has_adjusted_waypoint_ = false;
     const double waypoint_change_threshold_ = 0.05;  // meters - threshold to detect new waypoint
+    
+    // Timing measurement
+    std::chrono::steady_clock::time_point queue_received_time_;
     
     // Cached data
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_world_;
@@ -214,6 +218,8 @@ private:
         
         // Only process once per jump cycle, during state 3
         if (current_jumping_state_ == 3 && !processed_this_cycle_) {
+            queue_received_time_ = std::chrono::steady_clock::now();
+            RCLCPP_INFO(this->get_logger(), "[TIMING] Queue state received, starting planning...");
             runPotentialFieldPlanning();
             processed_this_cycle_ = true;
         }
@@ -344,6 +350,14 @@ private:
             adjusted_msg.header.frame_id = "world";
             adjusted_msg.point = adjusted_waypoint;
             adjusted_waypoint_pub_->publish(adjusted_msg);
+            
+            // DEBUG: timing measurement
+            auto publish_time = std::chrono::steady_clock::now();
+            auto planning_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                publish_time - queue_received_time_).count();
+            RCLCPP_INFO(this->get_logger(), 
+                "[TIMING] Adjusted waypoint published - planning took %.2f ms",
+                planning_duration / 1000.0);
             
             // Record that we've adjusted this waypoint (store ORIGINAL position for comparison)
             last_adjusted_waypoint_original_ = next_waypoint_;

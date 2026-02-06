@@ -48,16 +48,20 @@ public:
         this->declare_parameter("max_waypoint_displacement", 0.3);  // meters
         this->declare_parameter("min_obstacle_distance", 0.1);      // meters - clamp for force calculation
         this->declare_parameter("force_gain", 0.5);                 // scaling factor for repulsive force
+        this->declare_parameter("obstacle_z_min", 0.15);            // meters - ignore points below this (ground filter)
+        this->declare_parameter("obstacle_z_max", 1.5);             // meters - ignore points above this
         
         // Get parameters
         obstacle_detection_radius_ = this->get_parameter("obstacle_detection_radius").as_double();
         max_waypoint_displacement_ = this->get_parameter("max_waypoint_displacement").as_double();
         min_obstacle_distance_ = this->get_parameter("min_obstacle_distance").as_double();
         force_gain_ = this->get_parameter("force_gain").as_double();
+        obstacle_z_min_ = this->get_parameter("obstacle_z_min").as_double();
+        obstacle_z_max_ = this->get_parameter("obstacle_z_max").as_double();
         
         RCLCPP_INFO(this->get_logger(), 
-            "Local planner initialized with: detection_radius=%.2f, max_displacement=%.2f",
-            obstacle_detection_radius_, max_waypoint_displacement_);
+            "Local planner initialized with: detection_radius=%.2f, max_displacement=%.2f, z_filter=[%.2f, %.2f]",
+            obstacle_detection_radius_, max_waypoint_displacement_, obstacle_z_min_, obstacle_z_max_);
         
         // Initialize TF2
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
@@ -95,6 +99,8 @@ private:
     double max_waypoint_displacement_;
     double min_obstacle_distance_;
     double force_gain_;
+    double obstacle_z_min_;  // Ground filter: ignore points below this height
+    double obstacle_z_max_;  // Ceiling filter: ignore points above this height
     
     // TF2
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -104,6 +110,13 @@ private:
     int8_t current_jumping_state_ = 0;
     int8_t prev_jumping_state_ = 0;
     bool processed_this_cycle_ = false;
+    
+    // Cumulative drift prevention: track which waypoint we've already adjusted
+    // We store the original waypoint position before adjustment, so we can detect
+    // when a NEW waypoint appears (different position = robot moved to next goal)
+    geometry_msgs::msg::Point last_adjusted_waypoint_original_;
+    bool has_adjusted_waypoint_ = false;
+    const double waypoint_change_threshold_ = 0.05;  // meters - threshold to detect new waypoint
     
     // Cached data
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_world_;
@@ -220,6 +233,27 @@ private:
             return;
         }
         
+        // Cumulative drift prevention: check if this is the SAME waypoint we already adjusted
+        if (has_adjusted_waypoint_) {
+            double dx = next_waypoint_.x - last_adjusted_waypoint_original_.x;
+            double dy = next_waypoint_.y - last_adjusted_waypoint_original_.y;
+            double dist_to_last = std::sqrt(dx * dx + dy * dy);
+            
+            if (dist_to_last < waypoint_change_threshold_) {
+                // Same waypoint as before - don't adjust again to prevent cumulative drift
+                RCLCPP_INFO(this->get_logger(), 
+                    "Skipping adjustment - waypoint (%.2f, %.2f) already adjusted this goal period",
+                    next_waypoint_.x, next_waypoint_.y);
+                return;
+            } else {
+                // New waypoint detected - robot must have moved to next goal
+                RCLCPP_INFO(this->get_logger(), 
+                    "New next waypoint detected (%.2f, %.2f) - allowing adjustment",
+                    next_waypoint_.x, next_waypoint_.y);
+                has_adjusted_waypoint_ = false;
+            }
+        }
+        
         if (!cloud_valid_ || !latest_cloud_world_) {
             RCLCPP_WARN(this->get_logger(), "No valid LiDAR data available");
             publishVisualization({}, next_waypoint_, next_waypoint_, 0.0, 0.0);
@@ -234,6 +268,12 @@ private:
         for (const auto& pt : latest_cloud_world_->points) {
             // Skip invalid points
             if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+                continue;
+            }
+            
+            // Z-filter: ignore ground returns and ceiling points
+            // Only consider obstacles at heights where robot could collide
+            if (pt.z < obstacle_z_min_ || pt.z > obstacle_z_max_) {
                 continue;
             }
             
@@ -304,6 +344,10 @@ private:
             adjusted_msg.header.frame_id = "world";
             adjusted_msg.point = adjusted_waypoint;
             adjusted_waypoint_pub_->publish(adjusted_msg);
+            
+            // Record that we've adjusted this waypoint (store ORIGINAL position for comparison)
+            last_adjusted_waypoint_original_ = next_waypoint_;
+            has_adjusted_waypoint_ = true;
             
             publishVisualization(nearby_obstacles, next_waypoint_, adjusted_waypoint,
                                 total_force_x, total_force_y);

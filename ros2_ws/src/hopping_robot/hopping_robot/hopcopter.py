@@ -8,11 +8,12 @@ from collections import deque
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Point, PointStamped, PoseArray
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseStamped, Twist, AccelStamped
 from crazyflie_interfaces.msg import LogDataGeneric, FullState
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Int8
 import sys
 from scipy.spatial.transform import Rotation
 from hopping_robot.RisLib.standard_pid import PidControlRaw
@@ -21,7 +22,6 @@ from hopping_robot.RisLib.cflog import LoggingCore
 from functools import partial
 from sensor_msgs.msg import Imu
 from visualization_msgs.msg import Marker
-from queue import Queue
 
 import logging
 import time
@@ -166,14 +166,18 @@ class hopcopter(Node):
         self.pos_x, self.pos_y, self.pos_z = 0.0, 0.0, 0.0
         self.ori_x, self.ori_y, self.ori_z, self.ori_w = 0.0, 0.0, 0.0, 0.0
 
-        # Trajectory following variables
-        self.trajectory_queue = Queue()
+        # Trajectory following variables - using list for O(1) index access (local planner needs this)
+        self.waypoint_list = []  # List of (x, y, z) tuples
         self.current_goal_tolerance = 0.4  # meters - configurable tolerance
         self.has_active_goal = False
         self.goal_reached_count = 0
         self.last_waypoint_position = None  # Store last completed waypoint
         self.pending_new_traj = False       # True between DELETE and ADD to avoid jumps
         self.trajectory_received = False    # Only allow control after first trajectory received
+        
+        # Local planner integration - jumping state tracking for external nodes
+        self.prev_jumping_state = 0  # Track state transitions
+        self.queue_state_published_this_cycle = False  # Ensure single publish per jump cycle
         
         # Initialize desired positions as None until trajectory is received
         self.desired_x = None
@@ -199,6 +203,21 @@ class hopcopter(Node):
             PoseStamped,
             '/trajectory_start_position',
             self.trajectory_start_callback,
+            10
+        )
+        
+        # === Local Planner Integration ===
+        # Publisher for jumping state (Int8: 1=falling, 2=stance, 3=climbing)
+        self.jumping_state_pub = self.create_publisher(Int8, '/jumping_state', 10)
+        
+        # Publisher for trajectory queue state (PoseArray: [0]=current_goal, [1]=next_waypoint if exists)
+        self.queue_state_pub = self.create_publisher(PoseArray, '/trajectory_queue_state', 10)
+        
+        # Subscriber for adjusted waypoint from local planner
+        self.adjusted_waypoint_sub = self.create_subscription(
+            PointStamped,
+            '/local_planner/adjusted_waypoint',
+            self.adjusted_waypoint_callback,
             10
         )
 
@@ -305,21 +324,18 @@ class hopcopter(Node):
                     # Apply follower-gating to filter out "behind" points
                     filtered_points = self.apply_follower_gating(msg.points)
                     
-                    # Clear existing trajectory
-                    while not self.trajectory_queue.empty():
-                        self.trajectory_queue.get()
-
-                    # Queue filtered trajectory points
+                    # Clear existing trajectory and populate with new waypoints
+                    self.waypoint_list.clear()
                     for point in filtered_points:
                         waypoint = (float(point.x), float(point.y), float(point.z))
-                        self.trajectory_queue.put(waypoint)
+                        self.waypoint_list.append(waypoint)
 
                     # Mark that we've received our first trajectory
                     self.trajectory_received = True
 
                     # New trajectory is ready; clear pending flag and load first waypoint
                     self.pending_new_traj = False
-                    if not self.trajectory_queue.empty():
+                    if len(self.waypoint_list) > 0:
                         self._load_next_waypoint()
                 else:
                     # Ignore single-point goal messages on id==400 as well
@@ -332,8 +348,7 @@ class hopcopter(Node):
                     return
 
                 # Clear trajectory
-                while not self.trajectory_queue.empty():
-                    self.trajectory_queue.get()
+                self.waypoint_list.clear()
                 # Mark that an updated trajectory is incoming to suppress fallback to last goal
                 self.has_active_goal = False
                 self.pending_new_traj = True
@@ -386,9 +401,9 @@ class hopcopter(Node):
         return filtered_points
     
     def _load_next_waypoint(self):
-        """Load the next waypoint from the queue as the current goal"""
-        if not self.trajectory_queue.empty():
-            waypoint = self.trajectory_queue.get()
+        """Load the next waypoint from the list as the current goal (pops index 0)"""
+        if len(self.waypoint_list) > 0:
+            waypoint = self.waypoint_list.pop(0)  # Remove and return first element
             # Ignore the z component from trajectory; enforce desired_z=0.8
             wx, wy, _wz = waypoint
             self.desired_x = wx
@@ -408,6 +423,70 @@ class hopcopter(Node):
                 self.get_logger().info(f"All waypoints completed - holding last position: x={self.desired_x:.3f}, y={self.desired_y:.3f}, z={self.desired_z:.3f}")
             self.has_active_goal = False
             self.get_logger().info("All waypoints completed")
+    
+    def adjusted_waypoint_callback(self, msg: PointStamped) -> None:
+        """
+        Handle adjusted waypoint from local planner.
+        The waypoint index to modify is encoded in header.stamp.sec (index 0, 1, etc.)
+        """
+        try:
+            waypoint_index = msg.header.stamp.sec  # Index of waypoint to adjust
+            
+            if waypoint_index < len(self.waypoint_list):
+                old_wp = self.waypoint_list[waypoint_index]
+                new_wp = (msg.point.x, msg.point.y, old_wp[2])  # Keep original z
+                self.waypoint_list[waypoint_index] = new_wp
+                self.get_logger().info(
+                    f"Local planner adjusted waypoint[{waypoint_index}]: "
+                    f"({old_wp[0]:.3f}, {old_wp[1]:.3f}) -> ({new_wp[0]:.3f}, {new_wp[1]:.3f})"
+                )
+            else:
+                self.get_logger().warn(
+                    f"Local planner tried to adjust waypoint[{waypoint_index}] but list only has {len(self.waypoint_list)} items"
+                )
+        except Exception as e:
+            self.get_logger().error(f"Error in adjusted_waypoint_callback: {e}")
+    
+    def _publish_queue_state(self):
+        """
+        Publish current trajectory queue state for local planner.
+        PoseArray format:
+          - poses[0]: Current goal (desired_x, desired_y, desired_z) - the waypoint robot is heading toward
+          - poses[1]: Next waypoint (waypoint_list[0]) if exists - the one local planner should adjust
+        Position encodes (x, y, z), orientation.w encodes 1.0 if valid, 0.0 if not.
+        """
+        msg = PoseArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'world'
+        
+        # Pose 0: Current goal (what robot is heading toward now)
+        current_goal = Pose()
+        if self.desired_x is not None and self.desired_y is not None:
+            current_goal.position.x = float(self.desired_x)
+            current_goal.position.y = float(self.desired_y)
+            current_goal.position.z = float(self.desired_z)
+            current_goal.orientation.w = 1.0  # Valid flag
+        else:
+            current_goal.orientation.w = 0.0  # Invalid flag
+        msg.poses.append(current_goal)
+        
+        # Pose 1: Next waypoint (the one local planner should adjust)
+        next_waypoint = Pose()
+        if len(self.waypoint_list) > 0:
+            wp = self.waypoint_list[0]  # First item in list is next waypoint
+            next_waypoint.position.x = float(wp[0])
+            next_waypoint.position.y = float(wp[1])
+            next_waypoint.position.z = float(wp[2])
+            next_waypoint.orientation.w = 1.0  # Valid flag
+        else:
+            next_waypoint.orientation.w = 0.0  # Invalid flag - no next waypoint
+        msg.poses.append(next_waypoint)
+        
+        self.queue_state_pub.publish(msg)
+        self.get_logger().debug(
+            f"Published queue state: current_goal=({current_goal.position.x:.2f}, {current_goal.position.y:.2f}), "
+            f"next_wp_valid={next_waypoint.orientation.w > 0.5}"
+        )
 
         # # debug print (disable with ROS log level if too chatty)
         # self.get_logger().debug(
@@ -572,6 +651,25 @@ class hopcopter(Node):
         if not self.flight_enable and self.controller_start_flag:
             # jumping state tracking
             self.JSTO.step(self.az, self.Diff_Z.data_rate) # pass acceleration in the z direction
+            
+            # === Local Planner Integration: Publish jumping state and queue state ===
+            # Publish current jumping state for local planner
+            jumping_state_msg = Int8()
+            jumping_state_msg.data = self.JSTO.jumping_state
+            self.jumping_state_pub.publish(jumping_state_msg)
+            
+            # Detect transition TO state 3 (takeoff) - publish queue state once
+            if self.prev_jumping_state != 3 and self.JSTO.jumping_state == 3:
+                self.queue_state_published_this_cycle = False  # Reset flag for new jump cycle
+            
+            # Publish queue state once at the START of state 3
+            if self.JSTO.jumping_state == 3 and not self.queue_state_published_this_cycle:
+                self._publish_queue_state()
+                self.queue_state_published_this_cycle = True
+            
+            # Track state for transition detection
+            self.prev_jumping_state = self.JSTO.jumping_state
+            # === End Local Planner Integration ===
 
             if self.ready_to_drop:
                 self.jumping_counter = 0
@@ -671,7 +769,7 @@ class hopcopter(Node):
             f"current_x: {X_f}, current_y: {Y_f}, current_z: {Z_f}, "
             f"current_roll: {gzgt_robot_euler[2]*(180/math.pi)}, current_pitch: {-gzgt_robot_euler[1]*(180/math.pi)}, current_yaw: {angle_yaw}, " # leave angle_yaw as radian since command (yaw_flight) is also in radians
             f"desired_x: {self.desired_x}, desired_y: {self.desired_y}, desired_z: {self.desired_z}, desired_yaw: {self.desired_yaw}, "
-            f"has_active_goal: {self.has_active_goal}, goals_reached: {self.goal_reached_count}, queue_size: {self.trajectory_queue.qsize()}, queue_contents: {list(self.trajectory_queue.queue)}, "
+            f"has_active_goal: {self.has_active_goal}, goals_reached: {self.goal_reached_count}, queue_size: {len(self.waypoint_list)}, queue_contents: {self.waypoint_list}, "
             f"u_x: {u_x}, u_y: {u_y}, u_z: {u_z}, "
             f"kp_x: {kp_y}, error_x: {error_x}, ki_x: {ki_x}, error_x_int: {None}, kd_x: {kd_x}, error_x_dot: {error_x_dot}, constant_x: {constant_x}, "
             f"kp_y: {kp_y}, error_y: {error_y}, ki_y: {ki_y}, error_y_int: {None}, kd_y: {kd_y}, error_y_dot: {error_y_dot}, constant_y: {constant_y}, "

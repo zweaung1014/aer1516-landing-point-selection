@@ -41,104 +41,22 @@ namespace og = ompl::geometric;
 
 // 2D occupancy grid for collision checking in OMPL planning.
 // Stores a grid of cells (0=free, 1=occupied) based on LiDAR points.
-// Supports multi-band detection and temporal smoothing for stable obstacle detection.
 class GridMap {
 public:
   // Constructor: Initializes the grid with given bounds and resolution.
-  // history_size: number of frames for temporal smoothing (default 5)
-  // min_bands_required: minimum number of z-bands an obstacle must appear in (default 1)
-  // min_history_votes: minimum frames an obstacle must appear in to be marked occupied (default 2)
-  GridMap(double min_x, double max_x, double min_y, double max_y, double resolution,
-          int history_size = 5, int min_bands_required = 1, int min_history_votes = 2)
-  : min_x_(min_x), max_x_(max_x), min_y_(min_y), max_y_(max_y), resolution_(resolution),
-    history_size_(history_size), history_index_(0),
-    min_bands_required_(min_bands_required), min_history_votes_(min_history_votes) {
+  GridMap(double min_x, double max_x, double min_y, double max_y, double resolution)
+  : min_x_(min_x), max_x_(max_x), min_y_(min_y), max_y_(max_y), resolution_(resolution) {
     width_ = static_cast<int>(std::ceil((max_x_ - min_x_) / resolution_));
     height_ = static_cast<int>(std::ceil((max_y_ - min_y_) / resolution_));
-    const size_t grid_size = static_cast<size_t>(width_ * height_);
-    grid_.assign(grid_size, 0);
-    
-    // Initialize band grids (3 height bands)
-    band_low_.assign(grid_size, 0);
-    band_mid_.assign(grid_size, 0);
-    band_high_.assign(grid_size, 0);
-    
-    // Initialize history buffer for temporal smoothing
-    history_buffer_.resize(history_size_);
-    for (auto& frame : history_buffer_) {
-      frame.assign(grid_size, 0);
-    }
+    grid_.assign(static_cast<size_t>(width_ * height_), 0);
   }
 
-  // Clears all band grids for new frame processing.
-  inline void clearBands() {
-    std::fill(band_low_.begin(), band_low_.end(), 0);
-    std::fill(band_mid_.begin(), band_mid_.end(), 0);
-    std::fill(band_high_.begin(), band_high_.end(), 0);
-  }
-
-  // Marks the cell at world coordinates (x, y) in the appropriate z-band.
-  // z_world: the world z-coordinate of the point
-  // band_boundaries: [z_low_max, z_mid_max] - points below z_low_max go to low band,
-  //                  between z_low_max and z_mid_max go to mid band, above go to high band
-  inline void markOccupiedInBand(double x, double y, double z_world,
-                                  double z_low_max, double z_mid_max) {
-    int ix, iy;
-    worldToGrid(x, y, ix, iy);
-    if (inBounds(ix, iy)) {
-      const size_t idx = static_cast<size_t>(iy * width_ + ix);
-      if (z_world < z_low_max) {
-        band_low_[idx] = 1;
-      } else if (z_world < z_mid_max) {
-        band_mid_[idx] = 1;
-      } else {
-        band_high_[idx] = 1;
-      }
-    }
-  }
-
-  // Finalizes the current frame: applies multi-band filtering and updates temporal history.
-  // Returns the number of occupied cells in the final grid.
-  int finalizeFrame() {
-    const size_t grid_size = static_cast<size_t>(width_ * height_);
-    
-    // Step 1: Multi-band detection - only mark cells detected in >= min_bands_required_ bands
-    std::vector<uint8_t> current_frame(grid_size, 0);
-    for (size_t i = 0; i < grid_size; ++i) {
-      int band_count = band_low_[i] + band_mid_[i] + band_high_[i];
-      if (band_count >= min_bands_required_) {
-        current_frame[i] = 1;
-      }
-    }
-    
-    // Step 2: Store current frame in history buffer
-    history_buffer_[history_index_] = current_frame;
-    history_index_ = (history_index_ + 1) % history_size_;
-    
-    // Step 3: Temporal smoothing - mark cell occupied if seen in >= min_history_votes_ frames
-    int occupied_count = 0;
-    for (size_t i = 0; i < grid_size; ++i) {
-      int vote_count = 0;
-      for (const auto& frame : history_buffer_) {
-        vote_count += frame[i];
-      }
-      if (vote_count >= min_history_votes_) {
-        grid_[i] = 1;
-        ++occupied_count;
-      } else {
-        grid_[i] = 0;
-      }
-    }
-    
-    return occupied_count;
-  }
-
-  // Legacy method for backward compatibility - clears the entire grid.
+  // Clears the entire grid, setting all cells to free (0).
   inline void clear() {
     std::fill(grid_.begin(), grid_.end(), 0);
   }
 
-  // Legacy method - marks the cell at world coordinates (x, y) as occupied (1).
+  // Marks the cell at world coordinates (x, y) as occupied (1).
   inline void markOccupied(double x, double y) {
     int ix, iy;
     worldToGrid(x, y, ix, iy);
@@ -229,18 +147,6 @@ private:
   int width_;
   int height_;
   std::vector<uint8_t> grid_;
-  
-  // Multi-band detection: 3 height bands
-  std::vector<uint8_t> band_low_;   // Low height band
-  std::vector<uint8_t> band_mid_;   // Mid height band  
-  std::vector<uint8_t> band_high_;  // High height band
-  
-  // Temporal smoothing: circular history buffer
-  std::vector<std::vector<uint8_t>> history_buffer_;
-  int history_size_;
-  int history_index_;
-  int min_bands_required_;
-  int min_history_votes_;
 };
 
 // ROS 2 node that implements an OMPL-based RRT* planner.
@@ -257,15 +163,8 @@ public:
     declare_parameter<double>("map.min_y", -4.0);
     declare_parameter<double>("map.max_y", 4.0);
     declare_parameter<double>("map.resolution", 0.05);
-    declare_parameter<double>("map.z_min", 0.15);  // Filter ground returns - matches local planner
-    declare_parameter<double>("map.z_max", 3.0);   // Capture more of tall cylinders
-    // Multi-band detection: Z boundaries between low/mid/high bands
-    declare_parameter<double>("map.z_band_low_max", 0.8);   // Low band: z_min to 0.8m
-    declare_parameter<double>("map.z_band_mid_max", 1.5);   // Mid band: 0.8m to 1.5m, High band: 1.5m to z_max
-    declare_parameter<int>("map.min_bands_required", 1);    // Require detection in at least 1 band (less aggressive)
-    // Temporal smoothing parameters
-    declare_parameter<int>("map.history_size", 5);          // Number of frames to keep in history
-    declare_parameter<int>("map.min_history_votes", 2);     // Require detection in at least 2 of 5 frames (less aggressive)
+    declare_parameter<double>("map.z_min", 0.15);  // Filter ground returns
+    declare_parameter<double>("map.z_max", 3.0);   // Capture tall cylinders
     declare_parameter<double>("goal.x", 2.0);
     declare_parameter<double>("goal.y", 2.0);
     declare_parameter<double>("path.z", 0.8);
@@ -282,11 +181,6 @@ public:
     get_parameter("map.resolution", map_resolution_);
     get_parameter("map.z_min", z_min_);
     get_parameter("map.z_max", z_max_);
-    get_parameter("map.z_band_low_max", z_band_low_max_);
-    get_parameter("map.z_band_mid_max", z_band_mid_max_);
-    get_parameter("map.min_bands_required", min_bands_required_);
-    get_parameter("map.history_size", history_size_);
-    get_parameter("map.min_history_votes", min_history_votes_);
     get_parameter("goal.x", goal_x_);
     get_parameter("goal.y", goal_y_);
     get_parameter("path.z", path_z_);
@@ -295,8 +189,7 @@ public:
     get_parameter("robot.radius", robot_radius_);
     get_parameter("robot.self_collision_radius", self_collision_radius_);
 
-    grid_ = std::make_unique<GridMap>(map_min_x_, map_max_x_, map_min_y_, map_max_y_, map_resolution_,
-                                       history_size_, min_bands_required_, min_history_votes_);
+    grid_ = std::make_unique<GridMap>(map_min_x_, map_max_x_, map_min_y_, map_max_y_, map_resolution_);
 
     // TF2 setup for coordinate transforms
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -330,7 +223,7 @@ private:
   // Callback for LiDAR PointCloud2 messages: Transforms points to world frame, filters by z-band, and marks occupied cells.
   void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     try {
-      grid_->clearBands();  // Clear band grids for new frame (not the final grid)
+      grid_->clear();  // Clear grid for new frame
 
       // Check if transform is available from sensor frame to world frame
       if (!tf_buffer_->canTransform("world", msg->header.frame_id, tf2::TimePointZero, 
@@ -377,16 +270,11 @@ private:
           }
         }
         
-        // Filter by z-band and mark occupied in appropriate height band
+        // Filter by z-band and mark occupied in world coordinates
         if (point_out.point.z >= z_min_ && point_out.point.z <= z_max_) {
-          grid_->markOccupiedInBand(point_out.point.x, point_out.point.y, 
-                                    point_out.point.z, z_band_low_max_, z_band_mid_max_);
+          grid_->markOccupied(point_out.point.x, point_out.point.y);
         }
       }
-
-      // Finalize frame: apply multi-band filtering and temporal smoothing
-      int occupied_cells = grid_->finalizeFrame();
-      RCLCPP_DEBUG(get_logger(), "Frame finalized with %d occupied cells after multi-band + temporal filtering", occupied_cells);
 
       // Inflate obstacles by robot outer radius to enforce clearance
       grid_->dilateOccupied(robot_radius_);
@@ -607,11 +495,6 @@ private:
   double map_resolution_{};
   double z_min_{};
   double z_max_{};
-  double z_band_low_max_{};   // Z boundary between low and mid bands
-  double z_band_mid_max_{};   // Z boundary between mid and high bands
-  int min_bands_required_{};  // Minimum bands for multi-band detection
-  int history_size_{};        // Number of frames for temporal smoothing
-  int min_history_votes_{};   // Minimum votes for temporal smoothing
   double start_x_{};
   double start_y_{};
   double goal_x_{};

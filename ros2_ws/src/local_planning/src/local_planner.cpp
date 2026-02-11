@@ -49,7 +49,7 @@ public:
         this->declare_parameter("obstacle_detection_radius", 0.5);  // meters
         this->declare_parameter("max_waypoint_displacement", 0.3);  // meters
         this->declare_parameter("min_obstacle_distance", 0.1);      // meters - clamp for force calculation
-        this->declare_parameter("force_gain", 0.5);                 // scaling factor for repulsive force
+        this->declare_parameter("force_gain", 2.0);                 // scaling factor for repulsive force
         this->declare_parameter("obstacle_z_min", 0.15);            // meters - ignore points below this (ground filter)
         this->declare_parameter("obstacle_z_max", 1.5);             // meters - ignore points above this
         
@@ -319,8 +319,16 @@ private:
             // This ensures obstacle SIZE doesn't affect repulsion strength
             double clamped_dist = std::max(closest_dist, min_obstacle_distance_);
             
-            // Linear falloff repulsive force: (radius - dist) / radius
-            double force_magnitude = (obstacle_detection_radius_ - closest_dist) / obstacle_detection_radius_;
+            // More aggressive repulsive force - exponential falloff for very close obstacles
+            double normalized_dist = closest_dist / obstacle_detection_radius_;  // 0.0 to 1.0
+            double force_magnitude = (1.0 - normalized_dist);  // Linear component
+            
+            // Add exponential boost for very close obstacles (< 0.1m)
+            if (closest_dist < 0.1) {
+                double close_boost = std::exp(-closest_dist * 10.0);  // Exponential decay
+                force_magnitude += close_boost;
+            }
+            
             force_magnitude *= force_gain_;
             
             // Force direction: from closest obstacle toward waypoint (pushes waypoint away)

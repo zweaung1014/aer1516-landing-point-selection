@@ -163,8 +163,8 @@ public:
     declare_parameter<double>("map.min_y", -4.0);
     declare_parameter<double>("map.max_y", 4.0);
     declare_parameter<double>("map.resolution", 0.05);
-    declare_parameter<double>("map.z_min", 0.0);
-    declare_parameter<double>("map.z_max", 1.5);
+    declare_parameter<double>("map.z_min", 0.15);  // Filter ground returns - matches local planner
+    declare_parameter<double>("map.z_max", 3.0);   // Capture more of tall cylinders
     declare_parameter<double>("goal.x", 2.0);
     declare_parameter<double>("goal.y", 2.0);
     declare_parameter<double>("path.z", 0.8);

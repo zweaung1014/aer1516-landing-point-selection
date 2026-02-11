@@ -380,6 +380,7 @@
         </collision>
       </link>
     </model>
+    <!--
     <model name="pole_10">
       <static>true</static>
       <pose>0.7 0 1.755 0 0 0</pose>
@@ -406,5 +407,6 @@
         </collision>
       </link>
     </model>
+    -->
   </world>
 </sdf>

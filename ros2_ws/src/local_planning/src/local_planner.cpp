@@ -38,6 +38,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <limits>
 
 class LocalPlanner : public rclcpp::Node
 {
@@ -267,9 +268,13 @@ private:
         }
         
         // Find obstacles within detection radius of next waypoint
+        // Use CLOSEST obstacle only - obstacle size should NOT affect repulsion strength!
+        // "A bigger obstacle doesn't mean we should step farther away from it.
+        //  As long as we're at a 'safe' distance, that's fine!"
         std::vector<pcl::PointXYZ> nearby_obstacles;
-        double total_force_x = 0.0;
-        double total_force_y = 0.0;
+        double closest_dist = std::numeric_limits<double>::max();
+        double closest_dx = 0.0;
+        double closest_dy = 0.0;
         
         for (const auto& pt : latest_cloud_world_->points) {
             // Skip invalid points
@@ -291,21 +296,11 @@ private:
             if (dist < obstacle_detection_radius_) {
                 nearby_obstacles.push_back(pt);
                 
-                // Clamp minimum distance to avoid infinite forces
-                double clamped_dist = std::max(dist, min_obstacle_distance_);
-                
-                // Linear falloff repulsive force: (radius - dist) / radius
-                // Points closer to waypoint produce stronger repulsion
-                double force_magnitude = (obstacle_detection_radius_ - dist) / obstacle_detection_radius_;
-                force_magnitude *= force_gain_;
-                
-                // Force direction: from obstacle toward waypoint (pushes waypoint away)
-                if (clamped_dist > 1e-6) {
-                    double force_dir_x = -dx / clamped_dist;  // Negative because we want to push away
-                    double force_dir_y = -dy / clamped_dist;
-                    
-                    total_force_x += force_magnitude * force_dir_x;
-                    total_force_y += force_magnitude * force_dir_y;
+                // Track the CLOSEST obstacle point only
+                if (dist < closest_dist) {
+                    closest_dist = dist;
+                    closest_dx = dx;
+                    closest_dy = dy;
                 }
             }
         }
@@ -316,11 +311,27 @@ private:
         
         // Compute adjusted waypoint
         geometry_msgs::msg::Point adjusted_waypoint = next_waypoint_;
+        double force_x = 0.0;
+        double force_y = 0.0;
         
         if (!nearby_obstacles.empty()) {
+            // Calculate repulsion based on CLOSEST obstacle only
+            // This ensures obstacle SIZE doesn't affect repulsion strength
+            double clamped_dist = std::max(closest_dist, min_obstacle_distance_);
+            
+            // Linear falloff repulsive force: (radius - dist) / radius
+            double force_magnitude = (obstacle_detection_radius_ - closest_dist) / obstacle_detection_radius_;
+            force_magnitude *= force_gain_;
+            
+            // Force direction: from closest obstacle toward waypoint (pushes waypoint away)
+            if (clamped_dist > 1e-6) {
+                force_x = -closest_dx / clamped_dist * force_magnitude;
+                force_y = -closest_dy / clamped_dist * force_magnitude;
+            }
+            
             // Calculate displacement
-            double displacement_x = total_force_x;
-            double displacement_y = total_force_y;
+            double displacement_x = force_x;
+            double displacement_y = force_y;
             
             // Clamp to maximum displacement
             double displacement_mag = std::sqrt(displacement_x * displacement_x + 
@@ -337,10 +348,10 @@ private:
             adjusted_waypoint.y = next_waypoint_.y + displacement_y;
             
             RCLCPP_INFO(this->get_logger(),
-                "Adjusting waypoint: (%.2f, %.2f) -> (%.2f, %.2f), displacement=%.3f",
+                "Adjusting waypoint: (%.2f, %.2f) -> (%.2f, %.2f), displacement=%.3f, closest_dist=%.3f",
                 next_waypoint_.x, next_waypoint_.y,
                 adjusted_waypoint.x, adjusted_waypoint.y,
-                displacement_mag);
+                displacement_mag, closest_dist);
             
             // Publish adjusted waypoint
             // Use header.stamp.sec to encode waypoint index (0 = first item in waypoint_list)
@@ -364,7 +375,7 @@ private:
             has_adjusted_waypoint_ = true;
             
             publishVisualization(nearby_obstacles, next_waypoint_, adjusted_waypoint,
-                                total_force_x, total_force_y);
+                                force_x, force_y);
         } else {
             RCLCPP_INFO(this->get_logger(), "No obstacles detected - waypoint unchanged");
             publishVisualization({}, next_waypoint_, next_waypoint_, 0.0, 0.0);

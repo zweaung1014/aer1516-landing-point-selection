@@ -163,8 +163,8 @@ public:
     declare_parameter<double>("map.min_y", -4.0);
     declare_parameter<double>("map.max_y", 4.0);
     declare_parameter<double>("map.resolution", 0.05);
-    declare_parameter<double>("map.z_min", 0.15);  // Filter ground returns
-    declare_parameter<double>("map.z_max", 3.0);   // Capture tall cylinders
+    // Robot leg height with compression margin: 0.144m leg + ~0.1m spring compression + safety buffer
+    declare_parameter<double>("robot.leg_height", 0.25);
     declare_parameter<double>("goal.x", 2.0);
     declare_parameter<double>("goal.y", 2.0);
     declare_parameter<double>("path.z", 0.8);
@@ -179,8 +179,7 @@ public:
     get_parameter("map.min_y", map_min_y_);
     get_parameter("map.max_y", map_max_y_);
     get_parameter("map.resolution", map_resolution_);
-    get_parameter("map.z_min", z_min_);
-    get_parameter("map.z_max", z_max_);
+    get_parameter("robot.leg_height", leg_height_);
     get_parameter("goal.x", goal_x_);
     get_parameter("goal.y", goal_y_);
     get_parameter("path.z", path_z_);
@@ -270,8 +269,10 @@ private:
           }
         }
         
-        // Filter by z-band and mark occupied in world coordinates
-        if (point_out.point.z >= z_min_ && point_out.point.z <= z_max_) {
+        // Filter ground points using robot-relative threshold
+        // Points below (robot_z - leg_height + margin) are considered ground and ignored
+        double ground_z_threshold = current_start_z_ - leg_height_ + 0.05;  // 5cm margin above ground
+        if (point_out.point.z >= ground_z_threshold) {
           grid_->markOccupied(point_out.point.x, point_out.point.y);
         }
       }
@@ -308,11 +309,12 @@ private:
     }
   }
 
-  // Callback for current robot pose: Stores the latest x,y to use as the planning start.
+  // Callback for current robot pose: Stores the latest x,y,z to use as the planning start.
   void startPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     try {
       current_start_x_ = static_cast<double>(msg->pose.position.x);
       current_start_y_ = static_cast<double>(msg->pose.position.y);
+      current_start_z_ = static_cast<double>(msg->pose.position.z);
       have_current_start_ = true;
     } catch (const std::exception &e) {
       RCLCPP_ERROR(get_logger(), "Error in startPoseCallback: %s", e.what());
@@ -493,8 +495,7 @@ private:
   double map_min_y_{};
   double map_max_y_{};
   double map_resolution_{};
-  double z_min_{};
-  double z_max_{};
+  double leg_height_{};  // Robot leg height with compression margin for ground filtering
   double start_x_{};
   double start_y_{};
   double goal_x_{};
@@ -508,6 +509,7 @@ private:
   bool have_current_start_{false};
   double current_start_x_{};
   double current_start_y_{};
+  double current_start_z_{};
 
   // State
   bool have_grid_{false};

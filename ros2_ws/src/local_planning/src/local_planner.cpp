@@ -50,20 +50,19 @@ public:
         this->declare_parameter("max_waypoint_displacement", 0.3);  // meters
         this->declare_parameter("min_obstacle_distance", 0.1);      // meters - clamp for force calculation
         this->declare_parameter("force_gain", 2.0);                 // scaling factor for repulsive force
-        this->declare_parameter("obstacle_z_min", 0.15);            // meters - ignore points below this (ground filter)
-        this->declare_parameter("obstacle_z_max", 1.5);             // meters - ignore points above this
+        // Robot leg height with compression margin: 0.144m leg + ~0.1m spring compression + safety buffer
+        this->declare_parameter("robot_leg_height", 0.25);          // meters - for robot-relative ground filtering
         
         // Get parameters
         obstacle_detection_radius_ = this->get_parameter("obstacle_detection_radius").as_double();
         max_waypoint_displacement_ = this->get_parameter("max_waypoint_displacement").as_double();
         min_obstacle_distance_ = this->get_parameter("min_obstacle_distance").as_double();
         force_gain_ = this->get_parameter("force_gain").as_double();
-        obstacle_z_min_ = this->get_parameter("obstacle_z_min").as_double();
-        obstacle_z_max_ = this->get_parameter("obstacle_z_max").as_double();
+        robot_leg_height_ = this->get_parameter("robot_leg_height").as_double();
         
         RCLCPP_INFO(this->get_logger(), 
-            "Local planner initialized with: detection_radius=%.2f, max_displacement=%.2f, z_filter=[%.2f, %.2f]",
-            obstacle_detection_radius_, max_waypoint_displacement_, obstacle_z_min_, obstacle_z_max_);
+            "Local planner initialized with: detection_radius=%.2f, max_displacement=%.2f, leg_height=%.2f",
+            obstacle_detection_radius_, max_waypoint_displacement_, robot_leg_height_);
         
         // Initialize TF2
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
@@ -101,8 +100,7 @@ private:
     double max_waypoint_displacement_;
     double min_obstacle_distance_;
     double force_gain_;
-    double obstacle_z_min_;  // Ground filter: ignore points below this height
-    double obstacle_z_max_;  // Ceiling filter: ignore points above this height
+    double robot_leg_height_;  // For robot-relative ground filtering
     
     // TF2
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -282,9 +280,10 @@ private:
                 continue;
             }
             
-            // Z-filter: ignore ground returns and ceiling points
-            // Only consider obstacles at heights where robot could collide
-            if (pt.z < obstacle_z_min_ || pt.z > obstacle_z_max_) {
+            // Robot-relative ground filter: ignore points below (waypoint_z - leg_height + margin)
+            // Since waypoint is at flight height, this filters ground regardless of robot orientation
+            double ground_z_threshold = next_waypoint_.z - robot_leg_height_ + 0.05;  // 5cm margin
+            if (pt.z < ground_z_threshold) {
                 continue;
             }
             

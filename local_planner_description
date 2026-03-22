@@ -1,0 +1,30 @@
+Local planning: landing point selection
+
+Even though a rudimentary path planning algorithm outlined above is capable of transporting
+the Hopcopter to the goal, a more sophisticated approach that accounts for terrain conditions is
+required to enable stable and reliable traversal over uneven, cluttered, or sloped terrain. The
+Hopcopter discretizes a set of candidate landing points within a specified radius and computes
+a weighted score for each candidate, following an approach similar to the footstep planning
+method described by Fankhauser et al. [15]. To adapt the weighted scoring scheme to hopping
+robots, the evaluation criteria include:
+1. Slope of the surface
+2. Distance from nearby obstacles
+3. Distance from the takeoff point
+4. Proximity to the edges of the surface
+Only after full consideration of these criteria, Hopcopter will pick the landing point with the
+highest score.
+Criteria 1 takes into account the slope of the surface of the landing point. This is important
+because it directly affects the orientation of the friction cone. Landing on surfaces that have a
+higher slope will limit the allowed landing states and increase the risk of slippage. Hence, higher
+slopes will be made to deduct from the score.
+Criteria 2 considers the distance of nearby obstacles. Due to Hopcopter’s inverted pendulum
+swing, there is a risk of collision with nearby obstacles during the stance phase. To reduce this
+9
+risk, landing points that are close to obstacles will be penalized to bring the final landing point
+away from obstacles as much as possible.
+Criteria 3 considers distance from the takeoff point. Landing point accuracy becomes harder
+to predict as the hop distance increases. To reach landing points as accurately as possible, it is
+important to prioritize closer jumps. Hence, points that are farther away will be penalized.
+Criteria 4 considers the proximity of the landing point to edges of the surface. Due to
+instability, it is important to leave room for error. Prioritizing points that are closer to the center
+will reduce the risk of hopping past edges past which the terrain is unknown.

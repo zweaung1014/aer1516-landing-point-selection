@@ -1,0 +1,17 @@
+I wanna change the way this #file:local_planner.cpp works significantly. Instead of using potential fields, let's score landing points, pick the one with the highest score, and aim toward it. 
+
+Here are more details on how this should work.
+
+When the next point is identified, a circular grid of a certain radius (about 0.3 m, but make this configurable) around it should be discretized into potential landing points. (The discretization doesn't need to be too dense because hopping isn't that accurate anyway.) Each point should be scored based on its feasibility or quality as a potential landing point. The "feasibility" should be identified with a score calculated based on the way described in #file:local_planner_description . Each of the 4 criteria will have configurable weights so I can tweak which metric is of higher importance based on the situation. 
+
+For criteria 1, when calculating slope of the surface, just analyze the point clouds and calculate the average slope over a few point clouds. A sloped surface should reduce the score. 
+
+For criteria 2, when calculating distance from nearby obstacles, you can use the same approach that #file:local_planner.cpp uses right now. The closer a potential landing point is to a nearby obstacle, the lower the score should be. 
+
+For criteria 3, you will need to remember the previous point the robot will be taking off of right before it reaches next_waypoint_. This "previous point" is the point that the robot is about to get to; in other words, this point should be current_goal_. The farther away a potential landing point is from the takeoff point, the lower the score should be.
+
+For criteria 4, we need to implement a way to identify "edges". These are lidar point cloud frontiers that suddenly drop off in a 90 degree angle. This is to deal with situations in which the hopping robot is going up the stairs, in which case we should make it hop as close to the middle of the step as possible so that it's safer. The closer it is to an "edge", the lower the score should be. 
+
+Finally, when a score is calculated for all the potential landing points inside that circular grid, the one with the highest score should be picked. This point should replace the next_waypoint_ the same way the potential fields approach does right now in #file:local_planner.cpp . 
+
+Let's plan it out. Ask me questions if anything isn't clear. 

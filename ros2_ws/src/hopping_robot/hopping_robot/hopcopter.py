@@ -141,7 +141,7 @@ class hopcopter(Node):
         self.leg_length = 0.4
         self.jumping_counter = 0
         self.jumping_height_record = 0.5  # CoM vertical movement distance
-        self.powered_climbing_thrust = 15000 # might need to tune this, was 15000
+        self.powered_climbing_thrust = 17000 # might need to tune this, was 15000
         self.ready_to_drop = True
 
         # Initiate ROS2 publisher

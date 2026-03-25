@@ -78,10 +78,10 @@ public:
         this->declare_parameter("edge_height_threshold", 0.08);     // meters - Z drop to classify as edge
         
         // Scoring weights
-        this->declare_parameter("weight_slope", 1.0);
-        this->declare_parameter("weight_obstacle", 1.0);
-        this->declare_parameter("weight_distance", 1.0);
-        this->declare_parameter("weight_edge", 1.0);
+        this->declare_parameter("weight_slope", 0.0);
+        this->declare_parameter("weight_obstacle", 2.0);
+        this->declare_parameter("weight_distance", 0.0);
+        this->declare_parameter("weight_edge", 0.0);
         
         // Robot parameters
         this->declare_parameter("robot_leg_height", 0.25);          // meters - for ground filtering
@@ -276,7 +276,6 @@ private:
         // Only process once per jump cycle, during state 3
         if (current_jumping_state_ == 3 && !processed_this_cycle_) {
             queue_received_time_ = std::chrono::steady_clock::now();
-            RCLCPP_INFO(this->get_logger(), "[TIMING] Queue state received, starting planning...");
             runScoringBasedPlanning();
             processed_this_cycle_ = true;
         }
@@ -594,14 +593,12 @@ private:
      */
     void runScoringBasedPlanning()
     {
-        RCLCPP_INFO(this->get_logger(), "Running scoring-based landing point selection...");
-        
-        // Check prerequisites
+        // Check prerequisites - silently return if no waypoint
         if (!next_waypoint_valid_) {
-            RCLCPP_INFO(this->get_logger(), "No next waypoint to adjust");
-            publishVisualization({}, next_waypoint_, next_waypoint_);
             return;
         }
+        
+        RCLCPP_INFO(this->get_logger(), "Running scoring-based landing point selection...");
         
         // Cumulative drift prevention: check if this is the SAME waypoint we already adjusted
         if (has_adjusted_waypoint_) {

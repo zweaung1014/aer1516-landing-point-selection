@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.4.0] - 2026-03-24 - LiDAR Tilt for Landing Zone Coverage
+
+### Changed
+- **LiDAR sensor tilt**: Increased downward pitch from 2° to 15° (0.0349 → 0.2618 rad)
+  - Enables local_planner to see landing zones 0.5-1.0m ahead during jump planning
+  - Previous 2° tilt resulted in 0 points in waypoint regions at jump start
+  - New FOV: approximately +13.6° (up) to -43.6° (down) with ±28.6° vertical scan
+- **RRT* max range filter**: Added `map.max_ground_range` (default 1.0m) to ignore
+  distant ground returns that appear as obstacles due to tilted LiDAR geometry
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `map.max_ground_range` | 1.0 | Max distance (m) for obstacle detection - points beyond ignored |
+
+---
+
+## [2.3.0] - 2026-03-24 - Platform Ground-Filter Fix
+
+### Changed
+- **RRT* planner ground filtering**: Added absolute z-floor threshold (`map.min_obstacle_z`)
+  to prevent low traversable surfaces (e.g. the 0.1m landing platform) from being
+  marked as obstacles during altitude changes
+  - Ground threshold is now `max(robot_relative_threshold, min_obstacle_z)`
+  - Robot-relative filter alone was altitude-dependent and misclassified the platform
+    during takeoff/landing when the drone dipped below ~0.3m
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `map.min_obstacle_z` | 0.15 | Absolute world-frame z floor (m). LiDAR points below this are always treated as ground. |
+
+---
+
 ## [2.2.0] - 2026-03-22 - Voxel Grid Downsampling
 
 ### Changed

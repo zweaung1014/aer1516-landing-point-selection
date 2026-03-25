@@ -169,10 +169,15 @@ public:
     declare_parameter<double>("goal.y", 2.0);
     declare_parameter<double>("path.z", 0.8);
     declare_parameter<double>("planner.solve_time", 1.0);
-    declare_parameter<double>("planner.point_spacing", 0.5);
+    declare_parameter<double>("planner.point_spacing", 0.25);
     // Robot outer radius (meters). Derived from model.sdf.jinja: sqrt(2)*(74.25 mm) ≈ 0.105 m
-    declare_parameter<double>("robot.radius", 0.2); //was 0.105    // Self-collision filtering radius to prevent robot position being marked occupied
+    declare_parameter<double>("robot.radius", 0.35); // Inflated for safer clearance from obstacles
     declare_parameter<double>("robot.self_collision_radius", 0.15);
+    // Absolute world-frame z floor: LiDAR points below this height are always treated as ground
+    // Set just above known traversable surfaces (e.g. 0.1m platform → 0.15m floor)
+    declare_parameter<double>("map.min_obstacle_z", 0.15);
+    // Max range for obstacle detection - ignore points beyond this to filter tilted LiDAR ground returns
+    declare_parameter<double>("map.max_ground_range", 1.0);
     // Load parameter values
     get_parameter("map.min_x", map_min_x_);
     get_parameter("map.max_x", map_max_x_);
@@ -187,6 +192,8 @@ public:
     get_parameter("planner.point_spacing", point_spacing_);
     get_parameter("robot.radius", robot_radius_);
     get_parameter("robot.self_collision_radius", self_collision_radius_);
+    get_parameter("map.min_obstacle_z", min_obstacle_z_);
+    get_parameter("map.max_ground_range", max_ground_range_);
 
     grid_ = std::make_unique<GridMap>(map_min_x_, map_max_x_, map_min_y_, map_max_y_, map_resolution_);
 
@@ -259,6 +266,7 @@ private:
         tf2::doTransform(point_in, point_out, transform);
         
         // Self-collision filtering: Skip points too close to robot's current position
+        // Also skip points beyond max_ground_range to filter tilted LiDAR ground returns
         if (have_current_start_) {
           double dx = point_out.point.x - current_start_x_;
           double dy = point_out.point.y - current_start_y_;
@@ -267,11 +275,15 @@ private:
           if (distance_to_robot < self_collision_radius_) {
             continue;  // Skip this point - too close to robot
           }
+          if (distance_to_robot > max_ground_range_) {
+            continue;  // Skip this point - beyond obstacle detection range
+          }
         }
         
-        // Filter ground points using robot-relative threshold
-        // Points below (robot_z - leg_height + margin) are considered ground and ignored
-        double ground_z_threshold = current_start_z_ - leg_height_ + 0.05;  // 5cm margin above ground
+        // Filter ground points using the higher of two thresholds:
+        // 1) Robot-relative: current_z - leg_height + margin  (filters ground under robot)
+        // 2) Absolute floor: min_obstacle_z_  (always passes known low surfaces like platforms)
+        double ground_z_threshold = std::max(current_start_z_ - leg_height_ + 0.05, min_obstacle_z_);
         if (point_out.point.z >= ground_z_threshold) {
           grid_->markOccupied(point_out.point.x, point_out.point.y);
         }
@@ -505,6 +517,8 @@ private:
   double point_spacing_{};
   double robot_radius_{};
   double self_collision_radius_{};
+  double min_obstacle_z_{};
+  double max_ground_range_{};
   // Live start pose
   bool have_current_start_{false};
   double current_start_x_{};

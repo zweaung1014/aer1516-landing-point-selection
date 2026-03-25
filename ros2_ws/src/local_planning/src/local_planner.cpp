@@ -50,6 +50,9 @@
 #include <limits>
 #include <algorithm>
 #include <unordered_map>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
 
 // Candidate landing point with computed scores
 struct CandidatePoint {
@@ -79,8 +82,8 @@ public:
         
         // Scoring weights
         this->declare_parameter("weight_slope", 0.0);
-        this->declare_parameter("weight_obstacle", 2.0);
-        this->declare_parameter("weight_distance", 0.0);
+        this->declare_parameter("weight_obstacle", 1.0);
+        this->declare_parameter("weight_distance", 1.0);
         this->declare_parameter("weight_edge", 0.0);
         
         // Robot parameters
@@ -135,6 +138,9 @@ public:
         marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/local_planner/markers", 10);
         
+        // Initialize CSV logging file with timestamped filename
+        initCSVFile();
+        
         RCLCPP_INFO(this->get_logger(), "Local planner node started");
     }
 
@@ -179,6 +185,9 @@ private:
     // Timing measurement
     std::chrono::steady_clock::time_point queue_received_time_;
     
+    // CSV logging
+    std::ofstream csv_file_;
+    
     // Cached data
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_world_;
     bool cloud_valid_ = false;
@@ -197,6 +206,58 @@ private:
     // Publishers
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr adjusted_waypoint_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+    
+    /**
+     * @brief Initialize timestamped CSV file for logging planning decisions.
+     */
+    void initCSVFile()
+    {
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_now;
+        localtime_r(&time_t_now, &tm_now);
+        
+        std::ostringstream filename;
+        filename << "/home/zweminhtetaung/CrazySim/data/local_planner_output_"
+                 << std::put_time(&tm_now, "%Y-%m-%d_%H-%M-%S") << ".csv";
+        
+        csv_file_.open(filename.str(), std::ios::out | std::ios::app);
+        if (csv_file_.is_open()) {
+            csv_file_ << "timestamp,original_x,original_y,original_z,"
+                      << "selected_x,selected_y,selected_z,"
+                      << "total_score,score_slope,score_obstacle,score_distance,score_edge"
+                      << std::endl;
+            RCLCPP_INFO(this->get_logger(), "CSV logging to: %s", filename.str().c_str());
+        } else {
+            RCLCPP_ERROR(this->get_logger(), "Failed to open CSV file: %s", filename.str().c_str());
+        }
+    }
+    
+    /**
+     * @brief Log a planning decision (original waypoint + selected best point) to CSV.
+     */
+    void logToCSV(const geometry_msgs::msg::Point& original, const CandidatePoint& best)
+    {
+        if (!csv_file_.is_open()) return;
+        
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        std::tm tm_now;
+        localtime_r(&time_t_now, &tm_now);
+        
+        csv_file_ << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S") << "." 
+                  << std::setfill('0') << std::setw(3) << ms.count() << ","
+                  << std::fixed << std::setprecision(4)
+                  << original.x << "," << original.y << "," << original.z << ","
+                  << best.x << "," << best.y << "," << best.z << ","
+                  << std::setprecision(4)
+                  << best.total_score << "," << best.score_slope << ","
+                  << best.score_obstacle << "," << best.score_distance << ","
+                  << best.score_edge << std::endl;
+        csv_file_.flush();
+    }
     
     /**
      * @brief Cache the latest LiDAR scan, transformed to world frame.
@@ -699,6 +760,9 @@ private:
         RCLCPP_INFO(this->get_logger(), 
             "[TIMING] Best landing point published - planning took %.2f ms",
             planning_duration / 1000.0);
+        
+        // Log to CSV: original RRT* waypoint and selected best point
+        logToCSV(next_waypoint_, best);
         
         // Record adjustment
         last_adjusted_waypoint_original_ = next_waypoint_;

@@ -18,4 +18,8 @@ ros2_ws/log/
 # Auto-generated PID logs
 standard_pid_output_*.txt
 standard_pid_output_*.csv
+
+# Local planner CSV data
+data/*.csv
+
 .vscode/*

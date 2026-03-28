@@ -15,6 +15,7 @@
  *   - /cf_0/lidar/points (sensor_msgs/PointCloud2): LiDAR point cloud
  *   - /jumping_state (std_msgs/Int8): Current jumping state (1=falling, 2=stance, 3=climbing)
  *   - /trajectory_queue_state (geometry_msgs/PoseArray): Current goal and next waypoint
+ *   - /visited_waypoint (geometry_msgs/PointStamped): Every waypoint the robot targets (from hopcopter)
  * 
  * Publications:
  *   - /local_planner/adjusted_waypoint (geometry_msgs/PointStamped): Best landing point
@@ -131,6 +132,11 @@ public:
             10,
             std::bind(&LocalPlanner::queueStateCallback, this, std::placeholders::_1));
         
+        visited_waypoint_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
+            "/visited_waypoint",
+            10,
+            std::bind(&LocalPlanner::visitedWaypointCallback, this, std::placeholders::_1));
+        
         // Publishers
         adjusted_waypoint_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
             "/local_planner/adjusted_waypoint", 10);
@@ -188,6 +194,10 @@ private:
     // CSV logging
     std::ofstream csv_file_;
     
+    // CSV dedup: track last waypoint written to CSV to avoid duplicate rows
+    geometry_msgs::msg::Point last_csv_logged_waypoint_;
+    bool has_logged_current_waypoint_ = false;
+    
     // Cached data
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_world_;
     bool cloud_valid_ = false;
@@ -202,6 +212,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
     rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr jumping_state_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr queue_state_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr visited_waypoint_sub_;
     
     // Publishers
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr adjusted_waypoint_pub_;
@@ -234,6 +245,26 @@ private:
     }
     
     /**
+     * @brief Check if a waypoint is different from the last one logged to CSV.
+     */
+    bool isNewWaypoint(const geometry_msgs::msg::Point& wp)
+    {
+        if (!has_logged_current_waypoint_) return true;
+        double dx = wp.x - last_csv_logged_waypoint_.x;
+        double dy = wp.y - last_csv_logged_waypoint_.y;
+        return std::sqrt(dx * dx + dy * dy) >= waypoint_change_threshold_;
+    }
+    
+    /**
+     * @brief Mark a waypoint as logged to CSV (for dedup).
+     */
+    void markWaypointLogged(const geometry_msgs::msg::Point& wp)
+    {
+        last_csv_logged_waypoint_ = wp;
+        has_logged_current_waypoint_ = true;
+    }
+    
+    /**
      * @brief Log a planning decision (original waypoint + selected best point) to CSV.
      */
     void logToCSV(const geometry_msgs::msg::Point& original, const CandidatePoint& best)
@@ -257,6 +288,32 @@ private:
                   << best.score_obstacle << "," << best.score_distance << ","
                   << best.score_edge << std::endl;
         csv_file_.flush();
+        markWaypointLogged(original);
+    }
+    
+    /**
+     * @brief Log an RRT* waypoint where the local planner did NOT adjust it.
+     * Selected coordinates and scores are recorded as "-".
+     */
+    void logSkippedWaypoint(const geometry_msgs::msg::Point& original)
+    {
+        if (!csv_file_.is_open()) return;
+        if (!isNewWaypoint(original)) return;  // Already logged this waypoint
+        
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        std::tm tm_now;
+        localtime_r(&time_t_now, &tm_now);
+        
+        csv_file_ << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S") << "." 
+                  << std::setfill('0') << std::setw(3) << ms.count() << ","
+                  << std::fixed << std::setprecision(4)
+                  << original.x << "," << original.y << "," << original.z << ","
+                  << "-,-,-,-,-,-,-" << std::endl;
+        csv_file_.flush();
+        markWaypointLogged(original);
     }
     
     /**
@@ -340,6 +397,22 @@ private:
             runScoringBasedPlanning();
             processed_this_cycle_ = true;
         }
+    }
+    
+    /**
+     * @brief Handle visited waypoint from hopcopter.
+     * Every waypoint the robot targets is published here. If the local planner
+     * already logged it with scores (via logToCSV), the dedup in logSkippedWaypoint
+     * will skip it. Otherwise, it logs the RRT* point with dashes for scores.
+     */
+    void visitedWaypointCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg)
+    {
+        RCLCPP_DEBUG(this->get_logger(), 
+            "Visited waypoint received: (%.3f, %.3f, %.3f)",
+            msg->point.x, msg->point.y, msg->point.z);
+        
+        // Log this waypoint if the local planner didn't already log it with scores
+        logSkippedWaypoint(msg->point);
     }
     
     /**
@@ -651,12 +724,13 @@ private:
     
     /**
      * @brief Main planning function: generate candidates, score them, select best.
+     * @return true if planning ran successfully and logged to CSV, false otherwise.
      */
-    void runScoringBasedPlanning()
+    bool runScoringBasedPlanning()
     {
         // Check prerequisites - silently return if no waypoint
         if (!next_waypoint_valid_) {
-            return;
+            return false;
         }
         
         RCLCPP_INFO(this->get_logger(), "Running scoring-based landing point selection...");
@@ -671,7 +745,7 @@ private:
                 RCLCPP_INFO(this->get_logger(), 
                     "Skipping - waypoint (%.2f, %.2f) already adjusted this goal period",
                     next_waypoint_.x, next_waypoint_.y);
-                return;
+                return false;
             } else {
                 RCLCPP_INFO(this->get_logger(), 
                     "New next waypoint detected (%.2f, %.2f) - allowing adjustment",
@@ -682,8 +756,9 @@ private:
         
         if (!cloud_valid_ || !latest_cloud_world_) {
             RCLCPP_WARN(this->get_logger(), "No valid LiDAR data available");
+            logSkippedWaypoint(next_waypoint_);
             publishVisualization({}, next_waypoint_, next_waypoint_);
-            return;
+            return false;
         }
         
         // Pre-filter point cloud to region of interest
@@ -712,8 +787,9 @@ private:
         
         if (candidates.empty()) {
             RCLCPP_WARN(this->get_logger(), "No candidate points generated");
+            logSkippedWaypoint(next_waypoint_);
             publishVisualization({}, next_waypoint_, next_waypoint_);
-            return;
+            return false;
         }
         
         // Score each candidate using pre-filtered region points and pre-computed edges
@@ -769,6 +845,7 @@ private:
         has_adjusted_waypoint_ = true;
         
         publishVisualization(candidates, next_waypoint_, adjusted_waypoint);
+        return true;
     }
     
     /**

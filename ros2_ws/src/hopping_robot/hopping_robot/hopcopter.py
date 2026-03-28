@@ -213,6 +213,9 @@ class hopcopter(Node):
         # Publisher for trajectory queue state (PoseArray: [0]=current_goal, [1]=next_waypoint if exists)
         self.queue_state_pub = self.create_publisher(PoseArray, '/trajectory_queue_state', 10)
         
+        # Publisher for visited waypoints (PointStamped: every waypoint the robot targets)
+        self.visited_waypoint_pub = self.create_publisher(PointStamped, '/visited_waypoint', 10)
+        
         # Subscriber for adjusted waypoint from local planner
         self.adjusted_waypoint_sub = self.create_subscription(
             PointStamped,
@@ -414,6 +417,15 @@ class hopcopter(Node):
             # Store this as the last waypoint position
             self.last_waypoint_position = (self.desired_x, self.desired_y, 0.8)
             self.get_logger().info(f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}, z={self.desired_z:.3f}")
+            
+            # Publish visited waypoint so local planner can log it to CSV
+            visited_msg = PointStamped()
+            visited_msg.header.stamp = self.get_clock().now().to_msg()
+            visited_msg.header.frame_id = 'world'
+            visited_msg.point.x = float(wx)
+            visited_msg.point.y = float(wy)
+            visited_msg.point.z = 0.8
+            self.visited_waypoint_pub.publish(visited_msg)
         else:
             # No more waypoints - hold the last position if we had one
             if self.last_waypoint_position is not None:

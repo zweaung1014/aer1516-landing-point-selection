@@ -72,7 +72,7 @@ public:
     {
         // Declare parameters with defaults
         // Grid discretization
-        this->declare_parameter("candidate_grid_radius", 0.3);      // meters - radius of search circle
+        this->declare_parameter("candidate_grid_radius", 0.5);      // meters - radius of search circle
         this->declare_parameter("candidate_grid_step", 0.1);        // meters - spacing between candidates
         
         // Analysis radii
@@ -84,7 +84,7 @@ public:
         // Scoring weights
         this->declare_parameter("weight_slope", 0.0);
         this->declare_parameter("weight_obstacle", 1.0);
-        this->declare_parameter("weight_distance", 1.0);
+        this->declare_parameter("weight_distance", 0.1);
         this->declare_parameter("weight_edge", 0.0);
         
         // Robot parameters
@@ -144,6 +144,10 @@ public:
         marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/local_planner/markers", 10);
         
+        // Compute candidate count for CSV header (must be before initCSVFile)
+        num_candidate_slots_ = computeCandidateCount();
+        RCLCPP_INFO(this->get_logger(), "Candidate grid has %zu slots", num_candidate_slots_);
+        
         // Initialize CSV logging file with timestamped filename
         initCSVFile();
         
@@ -193,6 +197,7 @@ private:
     
     // CSV logging
     std::ofstream csv_file_;
+    size_t num_candidate_slots_ = 0;  // Number of candidate grid points (for CSV columns)
     
     // CSV dedup: track last waypoint written to CSV to avoid duplicate rows
     geometry_msgs::msg::Point last_csv_logged_waypoint_;
@@ -221,6 +226,39 @@ private:
     /**
      * @brief Initialize timestamped CSV file for logging planning decisions.
      */
+    /**
+     * @brief Compute the number of candidate grid points deterministically from parameters.
+     * Replicates the circle-filter logic from generateCandidatePoints.
+     */
+    size_t computeCandidateCount() const
+    {
+        size_t count = 0;
+        const double radius_sq = candidate_grid_radius_ * candidate_grid_radius_;
+        for (double dx = -candidate_grid_radius_; dx <= candidate_grid_radius_; dx += candidate_grid_step_) {
+            for (double dy = -candidate_grid_radius_; dy <= candidate_grid_radius_; dy += candidate_grid_step_) {
+                if (dx * dx + dy * dy <= radius_sq) {
+                    ++count;
+                }
+            }
+        }
+        return count;
+    }
+    
+    /**
+     * @brief Sort candidates in reading order: Y descending (top-to-bottom), then X ascending (left-to-right).
+     */
+    static void sortCandidatesReadingOrder(std::vector<CandidatePoint>& candidates)
+    {
+        std::sort(candidates.begin(), candidates.end(),
+            [](const CandidatePoint& a, const CandidatePoint& b) {
+                // Higher Y first (top row), then lower X first (left column)
+                if (std::abs(a.y - b.y) > 1e-9) {
+                    return a.y > b.y;
+                }
+                return a.x < b.x;
+            });
+    }
+    
     void initCSVFile()
     {
         auto now = std::chrono::system_clock::now();
@@ -229,16 +267,21 @@ private:
         localtime_r(&time_t_now, &tm_now);
         
         std::ostringstream filename;
-        filename << "/home/zweminhtetaung/CrazySim/data/local_planner_output_"
+        filename << "/home/zweminhtetaung/CrazySim/data/data_local_planner/local_planner_output_"
                  << std::put_time(&tm_now, "%Y-%m-%d_%H-%M-%S") << ".csv";
         
         csv_file_.open(filename.str(), std::ios::out | std::ios::app);
         if (csv_file_.is_open()) {
             csv_file_ << "timestamp,original_x,original_y,original_z,"
                       << "selected_x,selected_y,selected_z,"
-                      << "total_score,score_slope,score_obstacle,score_distance,score_edge"
-                      << std::endl;
-            RCLCPP_INFO(this->get_logger(), "CSV logging to: %s", filename.str().c_str());
+                      << "total_score,score_slope,score_obstacle,score_distance,score_edge";
+            // Append candidate columns: cand1_x,cand1_y,cand1_score, ...
+            for (size_t i = 1; i <= num_candidate_slots_; ++i) {
+                csv_file_ << ",cand" << i << "_x,cand" << i << "_y,cand" << i << "_score";
+            }
+            csv_file_ << std::endl;
+            RCLCPP_INFO(this->get_logger(), "CSV logging to: %s (%zu candidate slots)",
+                        filename.str().c_str(), num_candidate_slots_);
         } else {
             RCLCPP_ERROR(this->get_logger(), "Failed to open CSV file: %s", filename.str().c_str());
         }
@@ -267,7 +310,8 @@ private:
     /**
      * @brief Log a planning decision (original waypoint + selected best point) to CSV.
      */
-    void logToCSV(const geometry_msgs::msg::Point& original, const CandidatePoint& best)
+    void logToCSV(const geometry_msgs::msg::Point& original, const CandidatePoint& best,
+                   const std::vector<CandidatePoint>& candidates)
     {
         if (!csv_file_.is_open()) return;
         
@@ -286,7 +330,19 @@ private:
                   << std::setprecision(4)
                   << best.total_score << "," << best.score_slope << ","
                   << best.score_obstacle << "," << best.score_distance << ","
-                  << best.score_edge << std::endl;
+                  << best.score_edge;
+        
+        // Append all candidate points in reading order (Y desc, X asc)
+        std::vector<CandidatePoint> sorted_candidates = candidates;
+        sortCandidatesReadingOrder(sorted_candidates);
+        for (const auto& cp : sorted_candidates) {
+            csv_file_ << "," << cp.x << "," << cp.y << "," << cp.total_score;
+        }
+        // Pad remaining slots with dashes if fewer candidates than expected
+        for (size_t i = sorted_candidates.size(); i < num_candidate_slots_; ++i) {
+            csv_file_ << ",-,-,-";
+        }
+        csv_file_ << std::endl;
         csv_file_.flush();
         markWaypointLogged(original);
     }
@@ -311,7 +367,12 @@ private:
                   << std::setfill('0') << std::setw(3) << ms.count() << ","
                   << std::fixed << std::setprecision(4)
                   << original.x << "," << original.y << "," << original.z << ","
-                  << "-,-,-,-,-,-,-" << std::endl;
+                  << "-,-,-,-,-,-,-";
+        // Pad candidate columns with dashes
+        for (size_t i = 0; i < num_candidate_slots_; ++i) {
+            csv_file_ << ",-,-,-";
+        }
+        csv_file_ << std::endl;
         csv_file_.flush();
         markWaypointLogged(original);
     }
@@ -838,7 +899,7 @@ private:
             planning_duration / 1000.0);
         
         // Log to CSV: original RRT* waypoint and selected best point
-        logToCSV(next_waypoint_, best);
+        logToCSV(next_waypoint_, best, candidates);
         
         // Record adjustment
         last_adjusted_waypoint_original_ = next_waypoint_;

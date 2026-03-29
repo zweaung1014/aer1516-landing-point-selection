@@ -7,6 +7,10 @@
 #include <string>
 #include <cmath>
 #include <limits>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/logger.hpp"
@@ -424,6 +428,7 @@ private:
         points.push_back(p);
       }
 
+      logFirstPathToCSV(points);
       publishMarkerPath(points);
       publishTrajectoryStartPosition();
       RCLCPP_INFO(get_logger(), "Published trajectory with %zu points (id=%d).", points.size(), PATH_MARKER_ID);
@@ -545,6 +550,41 @@ private:
   // TF2 for coordinate transforms
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
+  // CSV logging: only the very first planned path is recorded
+  bool first_path_logged_{false};
+
+  // Logs the first successful RRT* path to a timestamped CSV file.
+  void logFirstPathToCSV(const std::vector<geometry_msgs::msg::Point> &points) {
+    if (first_path_logged_) return;
+
+    // Build timestamped filename
+    auto now_tp = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now_tp);
+    std::tm tm_now;
+    localtime_r(&time_t_now, &tm_now);
+
+    std::ostringstream filename;
+    filename << "/home/zweminhtetaung/CrazySim/data/data_rrt_star/rrt_star_path_"
+             << std::put_time(&tm_now, "%Y-%m-%d_%H-%M-%S") << ".csv";
+
+    std::ofstream csv(filename.str(), std::ios::out);
+    if (!csv.is_open()) {
+      RCLCPP_ERROR(get_logger(), "Failed to open CSV file: %s", filename.str().c_str());
+      return;
+    }
+
+    csv << "x,y,z" << std::endl;
+    csv << std::fixed << std::setprecision(6);
+    for (const auto &p : points) {
+      csv << p.x << "," << p.y << "," << p.z << "\n";
+    }
+    csv.close();
+
+    first_path_logged_ = true;
+    RCLCPP_INFO(get_logger(), "First RRT* path logged to CSV with %zu waypoints: %s",
+                points.size(), filename.str().c_str());
+  }
 
   // Marker id constant
   static constexpr int PATH_MARKER_ID = 400;

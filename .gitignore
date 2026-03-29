@@ -19,7 +19,7 @@ ros2_ws/log/
 standard_pid_output_*.txt
 standard_pid_output_*.csv
 
-# Local planner CSV data
-data/*.csv
+# Data CSV files (all subdirectories)
+data/**/*.csv
 
 .vscode/*

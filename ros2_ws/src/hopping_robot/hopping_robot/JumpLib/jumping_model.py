@@ -55,12 +55,15 @@ class JumpingModel3D:
 
         p_dot_ld = np.linalg.norm(v_landing)
 
+        # Find the rotation axis between landing and takeoff
         v_surface = np.cross(- v_landing, v_takeoff_dir)
-        v_surface_norm = np.linalg.norm(v_surface)
+        v_surface_norm = np.linalg.norm(v_surface) #normalize
+
         if v_surface_norm < self.tol:
             v_surface = np.array([1, 0, 0])
         else:
             v_surface = v_surface / v_surface_norm
+        # Find the angle between landing and takeoff directions
         theta_v = math.atan2(v_surface_norm, np.dot(- v_landing, v_takeoff_dir))  # theta_v
 
         self.model.input_theta_v(theta_v, p_dot_ld)
@@ -128,9 +131,11 @@ class LinearJumpingController:
 
     def jumping_planning(self, ):
         # norm_d_max = self.jumping_altitude * 2
+        # This is the maximum reachable horizontal distance given the jump energy
         norm_d_max = self.jumping_altitude * 2 + (
                     self.landing_x_dot_estimated ** 2 + self.landing_y_dot_estimated ** 2) / self.g
 
+        # Compute the horizontal displacement toward the goal from predicted landing point
         if self.remove_velocity_gain_flag:
             d_x = self.normal_gain * (self.desired_x - self.landing_x)
             d_y = self.normal_gain * (self.desired_y - self.landing_y)
@@ -140,8 +145,9 @@ class LinearJumpingController:
             d_y = self.velocity_gain * (self.desired_y - self.landing_y)
         norm_d = math.sqrt(d_x * d_x + d_y * d_y)
 
+        # This means: if the distance is greater than the maximum reachable distance,
         if norm_d > norm_d_max:
-            norm_v = math.cos(math.pi / 4)
+            norm_v = math.cos(math.pi / 4) # we will jump with 45 degree takeoff angle, so the horizontal velocity is cos(45) of the total velocity
             vertical_v = norm_v
         else:
             if not self.high_ballistic:

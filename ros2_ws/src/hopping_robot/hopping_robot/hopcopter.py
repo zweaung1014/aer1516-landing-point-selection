@@ -787,9 +787,9 @@ class hopcopter(Node):
                     self.JSTO.powered_climbing_end_timer = self.JHC.step(self.desired_z)
 
                     self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
-                                       self.pos_x, self.pos_y, Abs_time)
-                    self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, )
-                    self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, )
+                                       self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
+                    self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, ) # set desired x and y
+                    self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, ) #keep track of current state in real time
                     
                     # Plan ballistic trajectory
                     self.LJC.jumping_planning()

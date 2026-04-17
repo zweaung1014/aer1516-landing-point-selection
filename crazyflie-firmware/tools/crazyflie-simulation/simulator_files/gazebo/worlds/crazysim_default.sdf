@@ -131,69 +131,29 @@
     </model>
 
 
-
-
-    <!-- ==== Cylindrical poles: grid at x=[1..6], y=[-2..2], 1 m spacing ==== -->
-
-    <model name="pole_x1_ym2"><static>true</static><pose>1 -2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x1_ym1"><static>true</static><pose>1 -1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x1_y0"><static>true</static><pose>1 0 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x1_y1"><static>true</static><pose>1 1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x1_y2"><static>true</static><pose>1 2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x2_ym2"><static>true</static><pose>2 -2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x2_ym1"><static>true</static><pose>2 -1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x2_y0"><static>true</static><pose>2 0 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x2_y1"><static>true</static><pose>2 1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x2_y2"><static>true</static><pose>2 2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x3_ym2"><static>true</static><pose>3 -2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x3_ym1"><static>true</static><pose>3 -1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x3_y0"><static>true</static><pose>3 0 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x3_y1"><static>true</static><pose>3 1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x3_y2"><static>true</static><pose>3 2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x4_ym2"><static>true</static><pose>4 -2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x4_ym1"><static>true</static><pose>4 -1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x4_y0"><static>true</static><pose>4 0 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x4_y1"><static>true</static><pose>4 1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x4_y2"><static>true</static><pose>4 2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x5_ym2"><static>true</static><pose>5 -2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x5_ym1"><static>true</static><pose>5 -1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x5_y0"><static>true</static><pose>5 0 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x5_y1"><static>true</static><pose>5 1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x5_y2"><static>true</static><pose>5 2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x6_ym2"><static>true</static><pose>6 -2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x6_ym1"><static>true</static><pose>6 -1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x6_y0"><static>true</static><pose>6 0 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x6_y1"><static>true</static><pose>6 1 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
-
-    <model name="pole_x6_y2"><static>true</static><pose>6 2 0.75 0 0 0</pose><link name="link"><collision name="col"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry></collision><visual name="vis"><geometry><cylinder><radius>0.05</radius><length>1.5</length></cylinder></geometry><material><ambient>0.1 0.1 0.8 1</ambient><diffuse>0.1 0.1 0.8 1</diffuse></material></visual></link></model>
+    <!-- ==== Test obstacle: tall red box on path from origin to (0.6,0) ==== -->
+    <!-- Height 1.5m so most of the box is above the ground filter threshold (z > 0.6) -->
+    <model name="test_obstacle">
+      <static>true</static>
+      <pose>0.5 -0.2 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>0.15 0.15 1.5</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.15 0.15 1.5</size></box>
+          </geometry>
+          <material>
+            <ambient>0.9 0.1 0.1 1</ambient>
+            <diffuse>0.9 0.1 0.1 1</diffuse>
+            <specular>0.3 0.3 0.3 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
 
   </world>
 </sdf>

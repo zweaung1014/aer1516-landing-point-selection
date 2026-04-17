@@ -188,7 +188,7 @@ ros2 topic pub /goal_pose geometry_msgs/msg/PoseStamped \
 "{header: {frame_id: 'world'}, pose: {position: {x: 2.0, y: 2.0, z: 0.3}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
 or
 ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
-"{header: {frame_id: 'world'}, pose: {position: {x: 2.0, y: 2.0, z: 0.3}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+"{header: {frame_id: 'world'}, pose: {position: {x: 2.0, y: 0.5, z: 0.3}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
 
 # Transform the lidar point cloud from lidar frame to world frame, include 0.8 offset:
 ros2 run tf2_ros static_transform_publisher 0 0 0.8 0 0 0 world crazyflie_0/lidar/lidar_sensor

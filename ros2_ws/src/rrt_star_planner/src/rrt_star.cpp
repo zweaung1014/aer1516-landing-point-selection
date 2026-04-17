@@ -11,6 +11,7 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <queue>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/logger.hpp"
@@ -42,6 +43,13 @@
 
 namespace ob = ompl::base;
 namespace og = ompl::geometric;
+
+// Obstacle centroid and bounding-circle radius from connected-component clustering.
+struct ObstacleInfo {
+  double cx;      // centroid x (world frame)
+  double cy;      // centroid y (world frame)
+  double radius;  // max distance from centroid to any cell in the blob
+};
 
 // 2D occupancy grid for collision checking in OMPL planning.
 // Stores a grid of cells (0=free, 1=occupied) based on LiDAR points.
@@ -88,6 +96,90 @@ public:
   // Checks if grid indices (ix, iy) are within bounds.
   inline bool inBounds(int ix, int iy) const {
     return ix >= 0 && ix < width_ && iy >= 0 && iy < height_;
+  }
+
+  // Converts grid indices (ix, iy) to world-frame cell center coordinates.
+  inline void gridToWorld(int ix, int iy, double &wx, double &wy) const {
+    wx = min_x_ + (ix + 0.5) * resolution_;
+    wy = min_y_ + (iy + 0.5) * resolution_;
+  }
+
+  // Finds obstacle clusters within a bounding box using 8-connectivity flood-fill.
+  // Returns centroid and bounding-circle radius for each cluster.
+  std::vector<ObstacleInfo> findObstacles(double robot_x, double robot_y, double half_box) const {
+    // Compute grid-index bounds for the bounding box, clamped to grid extents
+    int ix_lo, iy_lo, ix_hi, iy_hi;
+    worldToGrid(robot_x - half_box, robot_y - half_box, ix_lo, iy_lo);
+    worldToGrid(robot_x + half_box, robot_y + half_box, ix_hi, iy_hi);
+    ix_lo = std::max(0, ix_lo);
+    iy_lo = std::max(0, iy_lo);
+    ix_hi = std::min(width_ - 1, ix_hi);
+    iy_hi = std::min(height_ - 1, iy_hi);
+
+    const int box_w = ix_hi - ix_lo + 1;
+    const int box_h = iy_hi - iy_lo + 1;
+    if (box_w <= 0 || box_h <= 0) return {};
+
+    std::vector<bool> visited(static_cast<size_t>(box_w * box_h), false);
+    std::vector<ObstacleInfo> obstacles;
+
+    // 8-connectivity neighbor offsets
+    static const int dx8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+    static const int dy8[] = {-1,  0,  1,-1, 1,-1, 0, 1};
+
+    for (int iy = iy_lo; iy <= iy_hi; ++iy) {
+      for (int ix = ix_lo; ix <= ix_hi; ++ix) {
+        const int li = (iy - iy_lo) * box_w + (ix - ix_lo); // local index
+        if (visited[static_cast<size_t>(li)]) continue;
+        if (grid_[static_cast<size_t>(iy * width_ + ix)] == 0) continue;
+
+        // BFS flood-fill to collect this blob
+        std::vector<std::pair<int,int>> blob;
+        std::queue<std::pair<int,int>> q;
+        q.push({ix, iy});
+        visited[static_cast<size_t>(li)] = true;
+
+        while (!q.empty()) {
+          auto [cx, cy] = q.front(); q.pop();
+          blob.emplace_back(cx, cy);
+          for (int d = 0; d < 8; ++d) {
+            const int nx = cx + dx8[d];
+            const int ny = cy + dy8[d];
+            if (nx < ix_lo || nx > ix_hi || ny < iy_lo || ny > iy_hi) continue;
+            const int nli = (ny - iy_lo) * box_w + (nx - ix_lo);
+            if (visited[static_cast<size_t>(nli)]) continue;
+            if (grid_[static_cast<size_t>(ny * width_ + nx)] == 0) continue;
+            visited[static_cast<size_t>(nli)] = true;
+            q.push({nx, ny});
+          }
+        }
+
+        // Compute centroid (mean of cell centers)
+        double sum_x = 0.0, sum_y = 0.0;
+        for (const auto &[bx, by] : blob) {
+          double wx, wy;
+          gridToWorld(bx, by, wx, wy);
+          sum_x += wx;
+          sum_y += wy;
+        }
+        const double n = static_cast<double>(blob.size());
+        const double centroid_x = sum_x / n;
+        const double centroid_y = sum_y / n;
+
+        // Compute radius (max distance from centroid to any cell center)
+        double max_dist = 0.0;
+        for (const auto &[bx, by] : blob) {
+          double wx, wy;
+          gridToWorld(bx, by, wx, wy);
+          const double dist = std::sqrt((wx - centroid_x)*(wx - centroid_x) +
+                                        (wy - centroid_y)*(wy - centroid_y));
+          if (dist > max_dist) max_dist = dist;
+        }
+
+        obstacles.push_back({centroid_x, centroid_y, max_dist});
+      }
+    }
+    return obstacles;
   }
 
   double min_x() const { return min_x_; }
@@ -181,7 +273,7 @@ public:
     // Set just above known traversable surfaces (e.g. 0.1m platform → 0.15m floor)
     declare_parameter<double>("map.min_obstacle_z", 0.15);
     // Max range for obstacle detection - ignore points beyond this to filter tilted LiDAR ground returns
-    declare_parameter<double>("map.max_ground_range", 1.0);
+    declare_parameter<double>("map.max_ground_range", 3.0);
     // Load parameter values
     get_parameter("map.min_x", map_min_x_);
     get_parameter("map.max_x", map_max_x_);
@@ -293,6 +385,11 @@ private:
         }
       }
 
+      // Extract obstacle clusters before dilation (one-shot, only until logged)
+      if (have_current_start_ && !obstacles_logged_) {
+        latest_obstacles_ = grid_->findObstacles(current_start_x_, current_start_y_, 3.0);
+      }
+
       // Inflate obstacles by robot outer radius to enforce clearance
       grid_->dilateOccupied(robot_radius_);
 
@@ -317,6 +414,15 @@ private:
       goal_y_ = static_cast<double>(msg->pose.position.y);
       goal_received_ = true;
       RCLCPP_INFO(get_logger(), "Received new goal: x=%.3f, y=%.3f", goal_x_, goal_y_);
+
+      // One-shot: log obstacle centroids when robot is still near origin
+      if (!obstacles_logged_ && have_current_start_ &&
+          std::abs(current_start_x_) < 0.3 && std::abs(current_start_y_) < 0.3 &&
+          !latest_obstacles_.empty()) {
+        logObstaclesToCSV();
+        obstacles_logged_ = true;
+      }
+
       if (have_grid_) {
         tryPlanAndPublish();
       }
@@ -535,6 +641,10 @@ private:
   bool goal_received_{false};
   rclcpp::Time latest_stamp_{};
 
+  // Obstacle clustering
+  std::vector<ObstacleInfo> latest_obstacles_;
+  bool obstacles_logged_{false};
+
   // ROS interfaces
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
@@ -553,6 +663,34 @@ private:
 
   // CSV logging: only the very first planned path is recorded
   bool first_path_logged_{false};
+
+  // Logs obstacle centroids and radii to a timestamped CSV file (one-shot).
+  void logObstaclesToCSV() {
+    auto now_tp = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now_tp);
+    std::tm tm_now;
+    localtime_r(&time_t_now, &tm_now);
+
+    std::ostringstream filename;
+    filename << "/home/zweminhtetaung/CrazySim/data/data_rrt_star/obstacles_"
+             << std::put_time(&tm_now, "%Y-%m-%d_%H-%M-%S") << ".csv";
+
+    std::ofstream csv(filename.str(), std::ios::out);
+    if (!csv.is_open()) {
+      RCLCPP_ERROR(get_logger(), "Failed to open obstacle CSV: %s", filename.str().c_str());
+      return;
+    }
+
+    csv << "cx,cy,radius" << std::endl;
+    csv << std::fixed << std::setprecision(6);
+    for (const auto &obs : latest_obstacles_) {
+      csv << obs.cx << "," << obs.cy << "," << obs.radius << "\n";
+    }
+    csv.close();
+
+    RCLCPP_INFO(get_logger(), "Logged %zu obstacle clusters to CSV: %s",
+                latest_obstacles_.size(), filename.str().c_str());
+  }
 
   // Logs the first successful RRT* path to a timestamped CSV file.
   void logFirstPathToCSV(const std::vector<geometry_msgs::msg::Point> &points) {

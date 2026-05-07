@@ -195,3 +195,7 @@ ros2 run tf2_ros static_transform_publisher 0 0 0.8 0 0 0 world crazyflie_0/lida
 
 # Launch the fast planner for ros2:
 ros2 launch  plan_manage  kino_replan_launch.xml
+
+# Launch the NLP interface:
+export PYTHONPATH=$HOME/CrazySim/ros2_ws/.venv/lib/python3.10/site-packages:$PYTHONPATH
+ros2 run nlp_goal_interface nlp_goal_node

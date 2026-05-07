@@ -12,8 +12,8 @@ Terminal (user types NL command)
         ▼
 ┌────────────────────────────┐
 │  nlp_goal_node             │
-│  • OpenAI gpt-4o-mini      │
-│  • Structured Outputs      │
+│  • Anthropic Claude Haiku  │
+│  • Tool Use (structured)   │
 │  • Publishes PoseStamped   │
 └──────────┬─────────────────┘
            │  /goal_pose
@@ -37,10 +37,10 @@ Terminal (user types NL command)
 ## Prerequisites
 
 ```bash
-pip install openai pydantic
+pip install anthropic
 ```
 
-You need an OpenAI API key. Get one at: https://platform.openai.com/api-keys
+You need an Anthropic API key. Get one at: https://console.anthropic.com/settings/keys
 
 ## Setup
 
@@ -48,7 +48,7 @@ You need an OpenAI API key. Get one at: https://platform.openai.com/api-keys
 
    ```bash
    # Option A: export in shell
-   export OPENAI_API_KEY=sk-...
+   export ANTHROPIC_API_KEY=sk-ant-...
 
    # Option B: source a .env file (create from template)
    cp ros2_ws/src/nlp_goal_interface/.env.example ros2_ws/src/nlp_goal_interface/.env
@@ -89,16 +89,16 @@ Type `quit`, `exit`, or `q` to stop. Ctrl+C also works.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `OPENAI_API_KEY` | *(required)* | Your OpenAI API key |
-| `NLP_GOAL_MODEL` | `gpt-4o-mini` | Model to use for coordinate extraction |
+| `ANTHROPIC_API_KEY` | *(required)* | Your Anthropic API key |
+| `NLP_GOAL_MODEL` | `claude-haiku-3-5-20241022` | Model to use for coordinate extraction |
 
 ## How It Works
 
 1. **Input**: User types a natural language command in the terminal.
 
-2. **LLM Call**: The node sends the command to OpenAI's Chat Completions API with:
+2. **LLM Call**: The node sends the command to Anthropic's Messages API with:
    - A system prompt that instructs the model to extract (x, y) coordinates
-   - **Structured Outputs** (`response_format=GoalCoordinate`) ensures the model returns valid JSON matching our Pydantic schema — no regex parsing needed.
+   - **Tool use** with `tool_choice={"type": "tool", "name": "extract_coordinates"}` forces Claude to call a tool with a JSON Schema defining `x` and `y` fields — guaranteeing structured output with no regex parsing needed.
 
 3. **Validation**: Coordinates are clamped to the valid map bounds (x: [-2, 8], y: [-4, 4]).
 
@@ -132,6 +132,6 @@ The LLM handles varied phrasings. Examples:
 
 2. **Multi-turn Context**: Maintain conversation history so the user can say "go a bit further" or "turn left from there".
 
-3. **Voice Input**: Replace terminal input with speech-to-text (e.g., OpenAI Whisper) for hands-free operation.
+3. **Voice Input**: Replace terminal input with speech-to-text for hands-free operation.
 
 4. **Semantic Map**: Build a labeled map of the environment so the LLM can resolve references to known locations ("go to the charging station").

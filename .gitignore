@@ -23,3 +23,13 @@ standard_pid_output_*.csv
 data/**/*.csv
 
 .vscode/*
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Environment files (contain API keys / secrets)
+.env
+*.env
+!.env.example

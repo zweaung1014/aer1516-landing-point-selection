@@ -69,16 +69,17 @@
     </light>
 
 
-    <!-- ==== Surrounding boundary (visual-only frame): 10 m × 6 m ==== -->
+    <!-- ==== Surrounding boundary (visual-only frame): 20 m × 12 m ==== -->
+    <!-- X: -3 to 17 (biased toward +x), Y: -6 to 6                   -->
     <model name="boundary_frame">
       <static>true</static>
 
       <!-- Top edge (along X) -->
       <link name="edge_top">
-        <pose>2 3 0.6 0 0 0</pose>
+        <pose>7 6 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>10 0.05 1.2</size></box>
+            <box><size>20 0.05 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -89,10 +90,10 @@
 
       <!-- Bottom edge (along X) -->
       <link name="edge_bottom">
-        <pose>2 -3 0.6 0 0 0</pose>
+        <pose>7 -6 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>10 0.05 1.2</size></box>
+            <box><size>20 0.05 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -106,7 +107,7 @@
         <pose>-3 0 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>0.05 6 1.2</size></box>
+            <box><size>0.05 12 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -117,10 +118,10 @@
 
       <!-- Right edge (along Y) -->
       <link name="edge_right">
-        <pose>7 0 0.6 0 0 0</pose>
+        <pose>17 0 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>0.05 6 1.2</size></box>
+            <box><size>0.05 12 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -131,29 +132,19 @@
     </model>
 
 
-    <!-- ==== Test obstacle: tall red box on path from origin to (0.6,0) ==== -->
-    <!-- Height 1.5m so most of the box is above the ground filter threshold (z > 0.6) -->
-    <model name="test_obstacle">
-      <static>true</static>
-      <pose>0.5 -0.2 0.75 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box><size>0.15 0.15 1.5</size></box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box><size>0.15 0.15 1.5</size></box>
-          </geometry>
-          <material>
-            <ambient>0.9 0.1 0.1 1</ambient>
-            <diffuse>0.9 0.1 0.1 1</diffuse>
-            <specular>0.3 0.3 0.3 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
+    <!-- ==== Chair (left side, x = -1.5) ==== -->
+    <include>
+      <name>chair</name>
+      <pose>4.0 2.5 0 0 0 0</pose>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair</uri>
+    </include>
+
+    <!-- ==== Prius Hybrid (right side, x = 2.5) ==== -->
+    <include>
+      <name>prius</name>
+      <pose>4.0 -2.5 0 0 0 0</pose>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Prius Hybrid</uri>
+    </include>
 
   </world>
 </sdf>

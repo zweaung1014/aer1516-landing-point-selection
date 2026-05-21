@@ -5,15 +5,11 @@ This project simulates **Hopcopter** — a Crazyflie-based monopedal hopping rob
 
 ## Demo
 
-**Simulation** — Local planner explanation
-
-[![Local planner explanation](https://img.youtube.com/vi/Yvn6zSlEApQ/0.jpg)](https://youtu.be/Yvn6zSlEApQ)
+**Simulation** — [Local planner explanation (YouTube)](https://youtu.be/Yvn6zSlEApQ)
 
 ![Hopcopter simulation](docs/simulation.gif)
 
-**Hardware** — Full hardware demo
-
-[![Full hardware demo](https://img.youtube.com/vi/_PuOxqvgZJw/0.jpg)](https://youtu.be/_PuOxqvgZJw)
+**Hardware** — [Full hardware demo (YouTube)](https://youtu.be/_PuOxqvgZJw)
 
 ![Hopcopter hardware](docs/hardware.gif)
 

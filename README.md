@@ -1,10 +1,10 @@
 # Perception-Informed Autonomous Navigation for a Monopedal Hopping Robot (Simulation)
 
-This project simulates Hopcopter (a quadcopter-based hopping robot) on Gazebo. LiDAR-based perception is used to enable Hopcopter to navigate among obstacles autonomously.
+This project simulates **Hopcopter** — a Crazyflie-based monopedal hopping robot — in Gazebo Harmonic. A ROS2 pipeline integrates LiDAR point-cloud processing, OMPL RRT* global path planning, and a multi-criteria local planner that scores and refines candidate landing zones in real time, enabling fully autonomous obstacle-aware navigation. An optional natural-language goal interface (powered by Claude) lets users command the robot in plain English.
 
 ## Demo
 
-<!-- TODO: Add GIFs or YouTube video links demonstrating the system -->
+![Hopcopter simulation](docs/simulation.gif)
 
 ## Authors
 

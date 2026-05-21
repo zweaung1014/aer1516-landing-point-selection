@@ -1,10 +1,21 @@
-# Perception-Informed Autonomous Navigation for a Monopedal Hopping Robot (Simulation)
+# Perception-Informed Autonomous Navigation for a Monopedal Hopping Robot 
+(Instructions are for simulation)
 
 This project simulates **Hopcopter** — a Crazyflie-based monopedal hopping robot — in Gazebo Harmonic. A ROS2 pipeline integrates LiDAR point-cloud processing, OMPL RRT* global path planning, and a multi-criteria local planner that scores and refines candidate landing zones in real time, enabling fully autonomous obstacle-aware navigation. An optional natural-language goal interface (powered by Claude) lets users command the robot in plain English.
 
 ## Demo
 
+**Simulation** — Local planner explanation
+
+[![Local planner explanation](https://img.youtube.com/vi/Yvn6zSlEApQ/0.jpg)](https://youtu.be/Yvn6zSlEApQ)
+
 ![Hopcopter simulation](docs/simulation.gif)
+
+**Hardware** — Full hardware demo
+
+[![Full hardware demo](https://img.youtube.com/vi/_PuOxqvgZJw/0.jpg)](https://youtu.be/_PuOxqvgZJw)
+
+![Hopcopter hardware](docs/hardware.gif)
 
 ## Authors
 

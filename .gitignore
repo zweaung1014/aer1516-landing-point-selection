@@ -18,4 +18,18 @@ ros2_ws/log/
 # Auto-generated PID logs
 standard_pid_output_*.txt
 standard_pid_output_*.csv
+
+# Data CSV files (all subdirectories)
+data/**/*.csv
+
 .vscode/*
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Environment files (contain API keys / secrets)
+.env
+*.env
+!.env.example

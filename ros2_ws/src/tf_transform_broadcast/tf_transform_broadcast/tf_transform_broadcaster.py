@@ -80,14 +80,14 @@ class RobotTFBroadcaster(Node):
             
             # LiDAR sensor offset and rotation from SDF file: 
             # Translation: 0.4m above base_link
-            # Rotation: 2 degrees forward tilt (0.0349 rad around Y-axis)
+            # Rotation: 15 degrees forward tilt (0.2618 rad around Y-axis)
             lidar_transform.transform.translation.x = 0.0
             lidar_transform.transform.translation.y = 0.0
             lidar_transform.transform.translation.z = 0.4
             
-            # 2-degree forward tilt: quaternion for rotation around Y-axis
-            # q = [0, sin(θ/2), 0, cos(θ/2)] where θ = 0.0349 rad
-            half_angle = 0.0349 / 2.0  # 2 degrees / 2 in radians
+            # 15-degree forward tilt: quaternion for rotation around Y-axis
+            # q = [0, sin(θ/2), 0, cos(θ/2)] where θ = 0.2618 rad
+            half_angle = 0.2618 / 2.0  # 15 degrees / 2 in radians
             lidar_transform.transform.rotation.x = 0.0
             lidar_transform.transform.rotation.y = math.sin(half_angle)  # ≈ 0.1908
             lidar_transform.transform.rotation.z = 0.0

@@ -23,8 +23,8 @@ from functools import partial
 from sensor_msgs.msg import Imu
 from visualization_msgs.msg import Marker
 
-import logging
-import time
+import csv
+import os
 from threading import Thread
 from datetime import datetime
 
@@ -40,16 +40,6 @@ from hopping_robot.JumpLib.jumping_model import LinearJumpingController
 from hopping_robot.JumpLib.jumping_model import InPlaneJumpingModel
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
-
-# Log commands into a file
-timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-log_filename = f"standard_pid_output_{timestamp_str}.txt"
-logging.basicConfig(
-    filename=log_filename,
-    level=logging.INFO,
-    format="%(asctime)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
 
 
 # class RealTimeSleeper:
@@ -141,7 +131,7 @@ class hopcopter(Node):
         self.leg_length = 0.4
         self.jumping_counter = 0
         self.jumping_height_record = 0.5  # CoM vertical movement distance
-        self.powered_climbing_thrust = 15000 # might need to tune this, was 15000
+        self.powered_climbing_thrust = 21000 # might need to tune this, was 15000
         self.ready_to_drop = True
 
         # Initiate ROS2 publisher
@@ -213,6 +203,9 @@ class hopcopter(Node):
         # Publisher for trajectory queue state (PoseArray: [0]=current_goal, [1]=next_waypoint if exists)
         self.queue_state_pub = self.create_publisher(PoseArray, '/trajectory_queue_state', 10)
         
+        # Publisher for visited waypoints (PointStamped: every waypoint the robot targets)
+        self.visited_waypoint_pub = self.create_publisher(PointStamped, '/visited_waypoint', 10)
+        
         # Subscriber for adjusted waypoint from local planner
         self.adjusted_waypoint_sub = self.create_subscription(
             PointStamped,
@@ -251,7 +244,53 @@ class hopcopter(Node):
         self.TJ = trajectory(reverse_R=1.1)
 
         self.t0 = self.get_clock().now()
+
+        # === Landing-point CSV logger ===
+        csv_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),  # package dir
+            '..', '..', '..', '..', '..', 'data', 'data_hopcopter'
+        )
+        csv_dir = os.path.normpath(csv_dir)
+        # Fallback to a known absolute path if relative resolution fails
+        if not os.path.isdir(csv_dir):
+            csv_dir = '/home/zweminhtetaung/CrazySim/data/data_hopcopter'
+        os.makedirs(csv_dir, exist_ok=True)
+        csv_filename = os.path.join(
+            csv_dir,
+            f"landing_points_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+        )
+        self.csv_file = open(csv_filename, 'w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow([
+            'timestamp', 'jump_number',
+            'base_x', 'base_y', 'base_z',
+            'roll_deg', 'pitch_deg', 'yaw_deg',
+            'leg_length',
+            'foot_x', 'foot_y', 'foot_z',
+        ])
+        self.get_logger().info(f'Landing-point CSV: {csv_filename}')
         
+    # ------------------------------------------------------------------
+    #  Compute foot contact position in world frame
+    # ------------------------------------------------------------------
+    def _compute_foot_position(self, pos_x, pos_y, pos_z,
+                               ori_x, ori_y, ori_z, ori_w,
+                               leg_length):
+        """
+        Transform the body-frame leg vector (0, 0, -leg_length) into world
+        frame using the current orientation quaternion and add to the
+        base_link position.
+
+        Returns (foot_x, foot_y, foot_z) in world frame.
+        """
+        R = Rotation.from_quat([ori_x, ori_y, ori_z, ori_w])
+        leg_body = np.array([0.0, 0.0, -leg_length])
+        leg_world = R.apply(leg_body)
+        foot_x = pos_x + leg_world[0]
+        foot_y = pos_y + leg_world[1]
+        foot_z = pos_z + leg_world[2]
+        return foot_x, foot_y, foot_z
+
     def gz_odom_velocity(self, msg: Odometry) -> None:
         """
         Ground-truth pose & velocity from Gazebo (bridged /cf_0/odom).
@@ -414,6 +453,15 @@ class hopcopter(Node):
             # Store this as the last waypoint position
             self.last_waypoint_position = (self.desired_x, self.desired_y, 0.8)
             self.get_logger().info(f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}, z={self.desired_z:.3f}")
+            
+            # Publish visited waypoint so local planner can log it to CSV
+            visited_msg = PointStamped()
+            visited_msg.header.stamp = self.get_clock().now().to_msg()
+            visited_msg.header.frame_id = 'world'
+            visited_msg.point.x = float(wx)
+            visited_msg.point.y = float(wy)
+            visited_msg.point.z = 0.8
+            self.visited_waypoint_pub.publish(visited_msg)
         else:
             # No more waypoints - hold the last position if we had one
             if self.last_waypoint_position is not None:
@@ -709,6 +757,25 @@ class hopcopter(Node):
                 self.LSE.update_landing_location(X_f, Y_f, Abs_time)
                 self.JHC.estimate_height(Abs_time)
 
+                # --- Log landing foot position to CSV ---
+                foot_x, foot_y, foot_z = self._compute_foot_position(
+                    self.pos_x, self.pos_y, self.pos_z,
+                    self.ori_x, self.ori_y, self.ori_z, self.ori_w,
+                    self.leg_length,
+                )
+                euler = Rotation.from_quat(
+                    [self.ori_x, self.ori_y, self.ori_z, self.ori_w]
+                ).as_euler('zyx', degrees=True)  # [yaw, pitch, roll]
+                self.csv_writer.writerow([
+                    f'{time.time():.6f}',
+                    self.jumping_counter,
+                    f'{self.pos_x:.6f}', f'{self.pos_y:.6f}', f'{self.pos_z:.6f}',
+                    f'{euler[2]:.4f}', f'{-euler[1]:.4f}', f'{euler[0]:.4f}',
+                    f'{self.leg_length:.6f}',
+                    f'{foot_x:.6f}', f'{foot_y:.6f}', f'{foot_z:.6f}',
+                ])
+                self.csv_file.flush()
+
             # run jumping controller after the apex
             if self.JSTO.jumping_state_old == 3 and self.JSTO.jumping_state == 1:
                 jumping_height_record = Z_f - self.leg_length
@@ -720,9 +787,9 @@ class hopcopter(Node):
                     self.JSTO.powered_climbing_end_timer = self.JHC.step(self.desired_z)
 
                     self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
-                                       self.pos_x, self.pos_y, Abs_time)
-                    self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, )
-                    self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, )
+                                       self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
+                    self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, ) # set desired x and y
+                    self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, ) #keep track of current state in real time
                     
                     # Plan ballistic trajectory
                     self.LJC.jumping_planning()
@@ -772,38 +839,6 @@ class hopcopter(Node):
             self.msg.angular.z = float(yaw_flight) # was desired_yaw, Yaw_error
             self.msg.linear.z = float(thrust_flight) # was thrust_flight
         
-        # Save acceleration data (units are in G)
-        acc_x, acc_y, acc_z = self.ax, self.ay, self.az
-
-        # Log them into a text file
-        error_x = self.desired_x - X_f
-        error_y = self.desired_y - Y_f
-        error_z = self.desired_z - Z_f
-        error_x_dot = self.desired_x_dot - self.Diff_X.data_rate
-        error_y_dot = self.desired_y_dot - self.Diff_Y.data_rate
-        error_z_dot = self.desired_z_dot - self.Diff_Z.data_rate        
-        logging.info(
-            f"UNIX Time: {time.time()}, "
-            f"motor_m1: {self.motor_m1}, motor_m2: {self.motor_m2}, motor_m3: {self.motor_m3}, motor_m4: {self.motor_m4}, "
-            f"gzgt_pos_x: {self.pos_x}, gzgt_pos_y: {self.pos_y}, gzgt_pos_z: {self.pos_z}, "
-            f"gzgt_current_roll: {gzgt_robot_euler[2]*(180/math.pi)}, gzgt_current_pitch: {-gzgt_robot_euler[1]*(180/math.pi)}, gzgt_current_yaw: {gzgt_robot_euler[0]}, "
-            f"self.current_pos.x: {self.current_pos.x}, self.current_pos.y: {self.current_pos.y}, self.current_pos.z: {self.current_pos.z}, "
-            f"self.current_ori.x: {self.current_ori.x}, self.current_ori.y: {self.current_ori.y}, self.current_ori.z: {self.current_ori.z}, self.current_ori.w: {self.current_ori.w}, "
-            f"current_x: {X_f}, current_y: {Y_f}, current_z: {Z_f}, "
-            f"current_roll: {gzgt_robot_euler[2]*(180/math.pi)}, current_pitch: {-gzgt_robot_euler[1]*(180/math.pi)}, current_yaw: {angle_yaw}, " # leave angle_yaw as radian since command (yaw_flight) is also in radians
-            f"desired_x: {self.desired_x}, desired_y: {self.desired_y}, desired_z: {self.desired_z}, desired_yaw: {self.desired_yaw}, "
-            f"has_active_goal: {self.has_active_goal}, goals_reached: {self.goal_reached_count}, queue_size: {len(self.waypoint_list)}, queue_contents: {self.waypoint_list}, "
-            f"u_x: {u_x}, u_y: {u_y}, u_z: {u_z}, "
-            f"kp_x: {kp_y}, error_x: {error_x}, ki_x: {ki_x}, error_x_int: {None}, kd_x: {kd_x}, error_x_dot: {error_x_dot}, constant_x: {constant_x}, "
-            f"kp_y: {kp_y}, error_y: {error_y}, ki_y: {ki_y}, error_y_int: {None}, kd_y: {kd_y}, error_y_dot: {error_y_dot}, constant_y: {constant_y}, "
-            f"kp_z: {kp_z}, error_z: {error_z}, ki_z: {ki_z}, error_z_int: {None}, kd_z: {kd_z}, error_z_dot: {error_z_dot}, constant_z: {constant_z}, "
-            f"vel_x: {vel_x}, vel_y: {vel_y}, vel_z: {vel_z}, "
-            f"acc_x: {acc_x}, acc_y: {acc_y}, acc_z: {acc_z}, "
-            f"roll_flight: {roll_flight}, pitch_flight: {pitch_flight}, thrust_flight: {thrust_flight}, yaw_error: {Yaw_error}, "
-            f"Roll: {self.msg.linear.y}, Pitch: {self.msg.linear.x}, Desired_yaw: {-self.msg.angular.z}, Thrust: {self.msg.linear.z}, "
-            f"jumping_state: {self.JSTO.jumping_state}, JSTO.powered_climbing_end_flag: {self.JSTO.powered_climbing_end_flag}, "
-            f"condition_log: {self.condition_log[-1]}, "
-        )
         # Publish the RPYT commands
         self.rpyt.publish(self.msg)
     
@@ -815,11 +850,12 @@ def main():
         rclpy.spin(node)
     except KeyboardInterrupt:
         node.get_logger().info('Shutting down.')
+    finally:
+        # Close the landing-point CSV file
+        if hasattr(node, 'csv_file') and not node.csv_file.closed:
+            node.csv_file.close()
     node.destroy_node()
     rclpy.shutdown()
-
-    # === Run CSV and plotting script after shutdown ===
-    # e_to_csv_standardPID.main()
 
 
 if __name__ == '__main__':

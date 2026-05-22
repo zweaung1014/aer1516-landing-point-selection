@@ -1,5 +1,5 @@
 // ROS 2 + OMPL-based RRT* planner in C++
-// Subscribes to LiDAR PointCloud2, builds a 2D occupancy grid (z-band filtered),
+// Subscribes to FAST-LIO's registered point cloud, builds a 2D occupancy grid (z-band filtered),
 // plans a 2D path using OMPL RRT*, and publishes the trajectory as a Marker (SPHERE_LIST).
 
 #include <memory>
@@ -7,11 +7,6 @@
 #include <string>
 #include <cmath>
 #include <limits>
-#include <fstream>
-#include <sstream>
-#include <iomanip>
-#include <chrono>
-#include <queue>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/logger.hpp"
@@ -24,6 +19,7 @@
 
 #include "visualization_msgs/msg/marker.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 
 // TF2 headers for coordinate transforms
 #include "tf2_ros/buffer.h"
@@ -32,6 +28,12 @@
 #include "tf2/time.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
+
+// PCL headers for voxel grid downsampling
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 // OMPL headers
 #include "ompl/base/SpaceInformation.h"
@@ -43,13 +45,6 @@
 
 namespace ob = ompl::base;
 namespace og = ompl::geometric;
-
-// Obstacle centroid and bounding-circle radius from connected-component clustering.
-struct ObstacleInfo {
-  double cx;      // centroid x (world frame)
-  double cy;      // centroid y (world frame)
-  double radius;  // max distance from centroid to any cell in the blob
-};
 
 // 2D occupancy grid for collision checking in OMPL planning.
 // Stores a grid of cells (0=free, 1=occupied) based on LiDAR points.
@@ -96,90 +91,6 @@ public:
   // Checks if grid indices (ix, iy) are within bounds.
   inline bool inBounds(int ix, int iy) const {
     return ix >= 0 && ix < width_ && iy >= 0 && iy < height_;
-  }
-
-  // Converts grid indices (ix, iy) to world-frame cell center coordinates.
-  inline void gridToWorld(int ix, int iy, double &wx, double &wy) const {
-    wx = min_x_ + (ix + 0.5) * resolution_;
-    wy = min_y_ + (iy + 0.5) * resolution_;
-  }
-
-  // Finds obstacle clusters within a bounding box using 8-connectivity flood-fill.
-  // Returns centroid and bounding-circle radius for each cluster.
-  std::vector<ObstacleInfo> findObstacles(double robot_x, double robot_y, double half_box) const {
-    // Compute grid-index bounds for the bounding box, clamped to grid extents
-    int ix_lo, iy_lo, ix_hi, iy_hi;
-    worldToGrid(robot_x - half_box, robot_y - half_box, ix_lo, iy_lo);
-    worldToGrid(robot_x + half_box, robot_y + half_box, ix_hi, iy_hi);
-    ix_lo = std::max(0, ix_lo);
-    iy_lo = std::max(0, iy_lo);
-    ix_hi = std::min(width_ - 1, ix_hi);
-    iy_hi = std::min(height_ - 1, iy_hi);
-
-    const int box_w = ix_hi - ix_lo + 1;
-    const int box_h = iy_hi - iy_lo + 1;
-    if (box_w <= 0 || box_h <= 0) return {};
-
-    std::vector<bool> visited(static_cast<size_t>(box_w * box_h), false);
-    std::vector<ObstacleInfo> obstacles;
-
-    // 8-connectivity neighbor offsets
-    static const int dx8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
-    static const int dy8[] = {-1,  0,  1,-1, 1,-1, 0, 1};
-
-    for (int iy = iy_lo; iy <= iy_hi; ++iy) {
-      for (int ix = ix_lo; ix <= ix_hi; ++ix) {
-        const int li = (iy - iy_lo) * box_w + (ix - ix_lo); // local index
-        if (visited[static_cast<size_t>(li)]) continue;
-        if (grid_[static_cast<size_t>(iy * width_ + ix)] == 0) continue;
-
-        // BFS flood-fill to collect this blob
-        std::vector<std::pair<int,int>> blob;
-        std::queue<std::pair<int,int>> q;
-        q.push({ix, iy});
-        visited[static_cast<size_t>(li)] = true;
-
-        while (!q.empty()) {
-          auto [cx, cy] = q.front(); q.pop();
-          blob.emplace_back(cx, cy);
-          for (int d = 0; d < 8; ++d) {
-            const int nx = cx + dx8[d];
-            const int ny = cy + dy8[d];
-            if (nx < ix_lo || nx > ix_hi || ny < iy_lo || ny > iy_hi) continue;
-            const int nli = (ny - iy_lo) * box_w + (nx - ix_lo);
-            if (visited[static_cast<size_t>(nli)]) continue;
-            if (grid_[static_cast<size_t>(ny * width_ + nx)] == 0) continue;
-            visited[static_cast<size_t>(nli)] = true;
-            q.push({nx, ny});
-          }
-        }
-
-        // Compute centroid (mean of cell centers)
-        double sum_x = 0.0, sum_y = 0.0;
-        for (const auto &[bx, by] : blob) {
-          double wx, wy;
-          gridToWorld(bx, by, wx, wy);
-          sum_x += wx;
-          sum_y += wy;
-        }
-        const double n = static_cast<double>(blob.size());
-        const double centroid_x = sum_x / n;
-        const double centroid_y = sum_y / n;
-
-        // Compute radius (max distance from centroid to any cell center)
-        double max_dist = 0.0;
-        for (const auto &[bx, by] : blob) {
-          double wx, wy;
-          gridToWorld(bx, by, wx, wy);
-          const double dist = std::sqrt((wx - centroid_x)*(wx - centroid_x) +
-                                        (wy - centroid_y)*(wy - centroid_y));
-          if (dist > max_dist) max_dist = dist;
-        }
-
-        obstacles.push_back({centroid_x, centroid_y, max_dist});
-      }
-    }
-    return obstacles;
   }
 
   double min_x() const { return min_x_; }
@@ -254,26 +165,28 @@ public:
   RRTStarPlannerNode()
   : Node("rrt_star_planner") {
     // Declare parameters with defaults similar to the Python implementation
-    declare_parameter<double>("map.min_x", -2.0);
+    declare_parameter<double>("map.min_x", -5.0);
     declare_parameter<double>("map.max_x", 8.0);
-    declare_parameter<double>("map.min_y", -4.0);
-    declare_parameter<double>("map.max_y", 4.0);
+    declare_parameter<double>("map.min_y", -5.0);
+    declare_parameter<double>("map.max_y", 5.0);
     declare_parameter<double>("map.resolution", 0.05);
     // Robot leg height with compression margin: 0.144m leg + ~0.1m spring compression + safety buffer
     declare_parameter<double>("robot.leg_height", 0.25);
+    declare_parameter<double>("robot.ceiling_height", 1.5);  // Filter points above this height
     declare_parameter<double>("goal.x", 2.0);
     declare_parameter<double>("goal.y", 2.0);
     declare_parameter<double>("path.z", 0.8);
     declare_parameter<double>("planner.solve_time", 1.0);
-    declare_parameter<double>("planner.point_spacing", 0.2);
+    declare_parameter<double>("planner.point_spacing", 0.5);
     // Robot outer radius (meters). Derived from model.sdf.jinja: sqrt(2)*(74.25 mm) ≈ 0.105 m
-    declare_parameter<double>("robot.radius", 0.35); // Inflated for safer clearance from obstacles
-    declare_parameter<double>("robot.self_collision_radius", 0.15);
-    // Absolute world-frame z floor: LiDAR points below this height are always treated as ground
-    // Set just above known traversable surfaces (e.g. 0.1m platform → 0.15m floor)
-    declare_parameter<double>("map.min_obstacle_z", 0.15);
-    // Max range for obstacle detection - ignore points beyond this to filter tilted LiDAR ground returns
-    declare_parameter<double>("map.max_ground_range", 3.0);
+    declare_parameter<double>("robot.radius", 0.35); //was 0.105    // Self-collision filtering radius to prevent robot position being marked occupied
+    declare_parameter<double>("robot.self_collision_radius", 0.5); // was 0.15
+    // Voxel filter leaf size for downsampling global map (meters)
+    declare_parameter<double>("map.voxel_leaf_size", 0.1);
+    // Region of interest radius around robot for point cloud cropping (meters)
+    declare_parameter<double>("map.roi_radius", 5.0);
+    // Grid update rate in Hz (throttles point cloud processing)
+    declare_parameter<double>("map.update_rate", 10.0);
     // Load parameter values
     get_parameter("map.min_x", map_min_x_);
     get_parameter("map.max_x", map_max_x_);
@@ -281,6 +194,7 @@ public:
     get_parameter("map.max_y", map_max_y_);
     get_parameter("map.resolution", map_resolution_);
     get_parameter("robot.leg_height", leg_height_);
+    get_parameter("robot.ceiling_height", ceiling_height_);
     get_parameter("goal.x", goal_x_);
     get_parameter("goal.y", goal_y_);
     get_parameter("path.z", path_z_);
@@ -288,8 +202,9 @@ public:
     get_parameter("planner.point_spacing", point_spacing_);
     get_parameter("robot.radius", robot_radius_);
     get_parameter("robot.self_collision_radius", self_collision_radius_);
-    get_parameter("map.min_obstacle_z", min_obstacle_z_);
-    get_parameter("map.max_ground_range", max_ground_range_);
+    get_parameter("map.voxel_leaf_size", voxel_leaf_size_);
+    get_parameter("map.roi_radius", roi_radius_);
+    get_parameter("map.update_rate", grid_update_rate_);
 
     grid_ = std::make_unique<GridMap>(map_min_x_, map_max_x_, map_min_y_, map_max_y_, map_resolution_);
 
@@ -301,93 +216,112 @@ public:
     grid_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>("/rrt_star_grid", 10);
     traj_start_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("/trajectory_start_position", 10);
 
+    // Subscribe to FAST-LIO's accumulated global map (stable, in camera_init frame)
+    // Using /Laser_map instead of /cloud_registered for stable obstacle persistence
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/cf_0/lidar/points", rclcpp::SensorDataQoS(),
+      "/Laser_map", rclcpp::SensorDataQoS(),
       std::bind(&RRTStarPlannerNode::cloudCallback, this, std::placeholders::_1));
 
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       "/goal_pose", 10,
       std::bind(&RRTStarPlannerNode::goalCallback, this, std::placeholders::_1));
 
-      // Subscribe to robot pose to plan from the current position instead of a fixed origin
-      start_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/cf_1/pose", rclcpp::SensorDataQoS(),
-        std::bind(&RRTStarPlannerNode::startPoseCallback, this, std::placeholders::_1));
+    // Subscribe to FAST-LIO odometry for robot position in odom frame
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+      "/Odometry", 10,
+      std::bind(&RRTStarPlannerNode::odomCallback, this, std::placeholders::_1));
+
+    // Initialize robot position (will be updated by odometry callback)
+    current_start_x_ = 0.0;
+    current_start_y_ = 0.0;
+    current_start_z_ = 0.4;
+    have_current_start_ = false;  // Wait for odometry
 
     plan_timer_ = create_wall_timer(
-      std::chrono::milliseconds(60000), //was 1000 ms
+      std::chrono::milliseconds(1000), //was 1000 ms
       std::bind(&RRTStarPlannerNode::tryPlanAndPublish, this));
 
-    RCLCPP_INFO(get_logger(), "RRT* planner node initialized.");
+    RCLCPP_INFO(get_logger(), "RRT* planner node initialized (hardware mode: camera_init frame).");
   }
 
 private:
-  // Callback for LiDAR PointCloud2 messages: Transforms points to world frame, filters by z-band, and marks occupied cells.
+  // Callback for FAST-LIO odometry: Updates robot position in odom frame
+  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    current_start_x_ = msg->pose.pose.position.x;
+    current_start_y_ = msg->pose.pose.position.y;
+    current_start_z_ = msg->pose.pose.position.z;
+    have_current_start_ = true;
+    
+    RCLCPP_DEBUG(get_logger(), "Robot position updated: (%.3f, %.3f, %.3f)",
+                 current_start_x_, current_start_y_, current_start_z_);
+  }
+
+  // Callback for FAST-LIO global map: Downsamples with voxel filter, crops by ROI, filters by z-band, and marks occupied cells.
   void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     try {
+      // Throttle grid updates based on configured rate
+      const double update_interval = 1.0 / grid_update_rate_;
+      if ((now() - last_grid_update_).seconds() < update_interval) {
+        return;  // Skip this update - too soon
+      }
+      last_grid_update_ = now();
+
+      // Convert ROS message to PCL point cloud
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_raw(new pcl::PointCloud<pcl::PointXYZ>());
+      pcl::fromROSMsg(*msg, *cloud_raw);
+      const size_t raw_count = cloud_raw->size();
+
+      // Voxel grid downsampling to reduce point count
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>());
+      pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+      voxel_filter.setInputCloud(cloud_raw);
+      voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
+      voxel_filter.filter(*cloud_filtered);
+
+      RCLCPP_DEBUG(get_logger(), "Voxel downsampled from %zu to %zu points (%.1f%% reduction)",
+                   raw_count, cloud_filtered->size(),
+                   100.0 * (1.0 - static_cast<double>(cloud_filtered->size()) / raw_count));
+
       grid_->clear();  // Clear grid for new frame
 
-      // Check if transform is available from sensor frame to world frame
-      if (!tf_buffer_->canTransform("world", msg->header.frame_id, tf2::TimePointZero, 
-                                   std::chrono::milliseconds(100))) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                           "Cannot transform from %s to world", msg->header.frame_id.c_str());
-        return;
-      }
+      const double roi_radius_sq = roi_radius_ * roi_radius_;
+      size_t point_count = 0;
+      size_t roi_filtered = 0;
 
-      // Get transform from sensor frame to world frame
-      geometry_msgs::msg::TransformStamped transform;
-      transform = tf_buffer_->lookupTransform("world", msg->header.frame_id, tf2::TimePointZero);
+      for (const auto& pt : cloud_filtered->points) {
+        const float x = pt.x;
+        const float y = pt.y;
+        const float z = pt.z;
 
-      sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
-      sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
-      sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
-
-      for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
-        const float x = *iter_x;
-        const float y = *iter_y;
-        const float z = *iter_z;
-        
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
           continue;
         }
 
-        // Transform point from sensor frame to world frame
-        geometry_msgs::msg::PointStamped point_in, point_out;
-        point_in.header = msg->header;
-        point_in.point.x = x;
-        point_in.point.y = y;
-        point_in.point.z = z;
-        
-        tf2::doTransform(point_in, point_out, transform);
-        
-        // Self-collision filtering: Skip points too close to robot's current position
-        // Also skip points beyond max_ground_range to filter tilted LiDAR ground returns
+        // ROI cropping: Skip points outside radius from robot position
         if (have_current_start_) {
-          double dx = point_out.point.x - current_start_x_;
-          double dy = point_out.point.y - current_start_y_;
-          double distance_to_robot = std::sqrt(dx*dx + dy*dy);
-          
-          if (distance_to_robot < self_collision_radius_) {
-            continue;  // Skip this point - too close to robot
-          }
-          if (distance_to_robot > max_ground_range_) {
-            continue;  // Skip this point - beyond obstacle detection range
-          }
-        }
-        
-        // Filter ground points using the higher of two thresholds:
-        // 1) Robot-relative: current_z - leg_height + margin  (filters ground under robot)
-        // 2) Absolute floor: min_obstacle_z_  (always passes known low surfaces like platforms)
-        double ground_z_threshold = std::max(current_start_z_ - leg_height_ + 0.05, min_obstacle_z_);
-        if (point_out.point.z >= ground_z_threshold) {
-          grid_->markOccupied(point_out.point.x, point_out.point.y);
-        }
-      }
+          double dx = x - current_start_x_;
+          double dy = y - current_start_y_;
+          double dist_sq = dx * dx + dy * dy;
 
-      // Extract obstacle clusters before dilation (one-shot, only until logged)
-      if (have_current_start_ && !obstacles_logged_) {
-        latest_obstacles_ = grid_->findObstacles(current_start_x_, current_start_y_, 3.0);
+          if (dist_sq > roi_radius_sq) {
+            ++roi_filtered;
+            continue;  // Skip this point - outside ROI
+          }
+
+          // Self-collision filtering: Skip points too close to robot
+          if (std::sqrt(dist_sq) < self_collision_radius_) {
+            continue;
+          }
+        }
+
+        // Filter ground points using robot-relative threshold and ceiling
+        // Points below (robot_z - leg_height + margin) are considered ground and ignored
+        // Points above ceiling_height are also ignored
+        double ground_z_threshold = current_start_z_ - leg_height_ + 0.05;  // 5cm margin above ground
+        if (z >= ground_z_threshold && z <= ceiling_height_) {
+          grid_->markOccupied(x, y);
+          ++point_count;
+        }
       }
 
       // Inflate obstacles by robot outer radius to enforce clearance
@@ -395,13 +329,12 @@ private:
 
       have_grid_ = true;
       latest_stamp_ = msg->header.stamp;
-      RCLCPP_DEBUG(get_logger(), "Updated occupancy grid from transformed LiDAR points.");
+      RCLCPP_DEBUG(get_logger(), "Updated occupancy grid: %zu points marked (%zu filtered by ROI).",
+                   point_count, roi_filtered);
 
       // Publish debug OccupancyGrid for visualization in RViz
       publishOccupancyGrid();
-      
-    } catch (const tf2::TransformException &ex) {
-      RCLCPP_ERROR(get_logger(), "TF2 transform failed: %s", ex.what());
+
     } catch (const std::exception &e) {
       RCLCPP_ERROR(get_logger(), "Error processing PointCloud2: %s", e.what());
     }
@@ -414,32 +347,11 @@ private:
       goal_y_ = static_cast<double>(msg->pose.position.y);
       goal_received_ = true;
       RCLCPP_INFO(get_logger(), "Received new goal: x=%.3f, y=%.3f", goal_x_, goal_y_);
-
-      // One-shot: log obstacle centroids when robot is still near origin
-      if (!obstacles_logged_ && have_current_start_ &&
-          std::abs(current_start_x_) < 0.3 && std::abs(current_start_y_) < 0.3 &&
-          !latest_obstacles_.empty()) {
-        logObstaclesToCSV();
-        obstacles_logged_ = true;
-      }
-
       if (have_grid_) {
         tryPlanAndPublish();
       }
     } catch (const std::exception &e) {
       RCLCPP_ERROR(get_logger(), "Error in goalCallback: %s", e.what());
-    }
-  }
-
-  // Callback for current robot pose: Stores the latest x,y,z to use as the planning start.
-  void startPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-    try {
-      current_start_x_ = static_cast<double>(msg->pose.position.x);
-      current_start_y_ = static_cast<double>(msg->pose.position.y);
-      current_start_z_ = static_cast<double>(msg->pose.position.z);
-      have_current_start_ = true;
-    } catch (const std::exception &e) {
-      RCLCPP_ERROR(get_logger(), "Error in startPoseCallback: %s", e.what());
     }
   }
 
@@ -534,7 +446,6 @@ private:
         points.push_back(p);
       }
 
-      logFirstPathToCSV(points);
       publishMarkerPath(points);
       publishTrajectoryStartPosition();
       RCLCPP_INFO(get_logger(), "Published trajectory with %zu points (id=%d).", points.size(), PATH_MARKER_ID);
@@ -550,7 +461,7 @@ private:
     }
     
     geometry_msgs::msg::PoseStamped start_msg;
-    start_msg.header.frame_id = "world";
+    start_msg.header.frame_id = planning_frame_;
     start_msg.header.stamp = now();
     start_msg.pose.position.x = current_start_x_;
     start_msg.pose.position.y = current_start_y_;
@@ -566,7 +477,7 @@ private:
   void publishMarkerPath(const std::vector<geometry_msgs::msg::Point> &points) {
     // DELETE previous marker
     visualization_msgs::msg::Marker del_marker;
-    del_marker.header.frame_id = "world";
+    del_marker.header.frame_id = planning_frame_;
     del_marker.header.stamp = now();
     del_marker.action = visualization_msgs::msg::Marker::DELETE;
     del_marker.id = PATH_MARKER_ID;
@@ -574,7 +485,7 @@ private:
 
     // ADD new marker
     visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = "world";
+    marker.header.frame_id = planning_frame_;
     marker.header.stamp = now();
     marker.id = PATH_MARKER_ID;
     marker.action = visualization_msgs::msg::Marker::ADD;
@@ -594,7 +505,7 @@ private:
   // Publishes the current occupancy grid as nav_msgs/OccupancyGrid for debugging.
   void publishOccupancyGrid() {
     nav_msgs::msg::OccupancyGrid grid_msg;
-    grid_msg.header.frame_id = "world";
+    grid_msg.header.frame_id = planning_frame_;
     grid_msg.header.stamp = now();
     grid_msg.info.resolution = map_resolution_;
     grid_msg.info.width = static_cast<uint32_t>(grid_->width());
@@ -619,6 +530,7 @@ private:
   double map_max_y_{};
   double map_resolution_{};
   double leg_height_{};  // Robot leg height with compression margin for ground filtering
+  double ceiling_height_{};  // Filter points above this height
   double start_x_{};
   double start_y_{};
   double goal_x_{};
@@ -628,8 +540,11 @@ private:
   double point_spacing_{};
   double robot_radius_{};
   double self_collision_radius_{};
-  double min_obstacle_z_{};
-  double max_ground_range_{};
+  double voxel_leaf_size_{};
+  double roi_radius_{};
+  double grid_update_rate_{};
+  // Hardware frames (FAST-LIO)
+  const std::string planning_frame_{"camera_init"};  // FAST-LIO world frame
   // Live start pose
   bool have_current_start_{false};
   double current_start_x_{};
@@ -640,15 +555,12 @@ private:
   bool have_grid_{false};
   bool goal_received_{false};
   rclcpp::Time latest_stamp_{};
-
-  // Obstacle clustering
-  std::vector<ObstacleInfo> latest_obstacles_;
-  bool obstacles_logged_{false};
+  rclcpp::Time last_grid_update_{0, 0, RCL_ROS_TIME};  // For throttling grid updates
 
   // ROS interfaces
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr start_pose_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr traj_pub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr traj_start_pub_;
@@ -660,69 +572,6 @@ private:
   // TF2 for coordinate transforms
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-
-  // CSV logging: only the very first planned path is recorded
-  bool first_path_logged_{false};
-
-  // Logs obstacle centroids and radii to a timestamped CSV file (one-shot).
-  void logObstaclesToCSV() {
-    auto now_tp = std::chrono::system_clock::now();
-    auto time_t_now = std::chrono::system_clock::to_time_t(now_tp);
-    std::tm tm_now;
-    localtime_r(&time_t_now, &tm_now);
-
-    std::ostringstream filename;
-    filename << "/home/zweminhtetaung/CrazySim/data/data_rrt_star/obstacles_"
-             << std::put_time(&tm_now, "%Y-%m-%d_%H-%M-%S") << ".csv";
-
-    std::ofstream csv(filename.str(), std::ios::out);
-    if (!csv.is_open()) {
-      RCLCPP_ERROR(get_logger(), "Failed to open obstacle CSV: %s", filename.str().c_str());
-      return;
-    }
-
-    csv << "cx,cy,radius" << std::endl;
-    csv << std::fixed << std::setprecision(6);
-    for (const auto &obs : latest_obstacles_) {
-      csv << obs.cx << "," << obs.cy << "," << obs.radius << "\n";
-    }
-    csv.close();
-
-    RCLCPP_INFO(get_logger(), "Logged %zu obstacle clusters to CSV: %s",
-                latest_obstacles_.size(), filename.str().c_str());
-  }
-
-  // Logs the first successful RRT* path to a timestamped CSV file.
-  void logFirstPathToCSV(const std::vector<geometry_msgs::msg::Point> &points) {
-    if (first_path_logged_) return;
-
-    // Build timestamped filename
-    auto now_tp = std::chrono::system_clock::now();
-    auto time_t_now = std::chrono::system_clock::to_time_t(now_tp);
-    std::tm tm_now;
-    localtime_r(&time_t_now, &tm_now);
-
-    std::ostringstream filename;
-    filename << "/home/zweminhtetaung/CrazySim/data/data_rrt_star/rrt_star_path_"
-             << std::put_time(&tm_now, "%Y-%m-%d_%H-%M-%S") << ".csv";
-
-    std::ofstream csv(filename.str(), std::ios::out);
-    if (!csv.is_open()) {
-      RCLCPP_ERROR(get_logger(), "Failed to open CSV file: %s", filename.str().c_str());
-      return;
-    }
-
-    csv << "x,y,z" << std::endl;
-    csv << std::fixed << std::setprecision(6);
-    for (const auto &p : points) {
-      csv << p.x << "," << p.y << "," << p.z << "\n";
-    }
-    csv.close();
-
-    first_path_logged_ = true;
-    RCLCPP_INFO(get_logger(), "First RRT* path logged to CSV with %zu waypoints: %s",
-                points.size(), filename.str().c_str());
-  }
 
   // Marker id constant
   static constexpr int PATH_MARKER_ID = 400;
@@ -736,4 +585,3 @@ int main(int argc, char **argv) {
   rclcpp::shutdown();
   return 0;
 }
-

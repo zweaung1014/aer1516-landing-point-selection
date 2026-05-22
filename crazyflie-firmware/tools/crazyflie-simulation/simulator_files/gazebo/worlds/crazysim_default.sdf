@@ -69,39 +69,17 @@
     </light>
 
 
-    <!-- ==== Ramp: 45 degrees ==== -->
-    <model name="ramp_45deg">
-      <static>true</static>
-      <!-- width=2, length=3, height=2.1 gives ~45° -->
-      <pose>4 -1 0 0 -0.7854 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box><size>1.5 1 2.1</size></box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box><size>3 1 2.1</size></box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.6 0.9 1</ambient>
-            <diffuse>0.3 0.6 0.9 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <!-- ==== Surrounding boundary (visual-only frame): 10 m × 6 m ==== -->
+    <!-- ==== Surrounding boundary (visual-only frame): 20 m × 12 m ==== -->
+    <!-- X: -3 to 17 (biased toward +x), Y: -6 to 6                   -->
     <model name="boundary_frame">
       <static>true</static>
 
       <!-- Top edge (along X) -->
       <link name="edge_top">
-        <pose>2 3 0.6 0 0 0</pose>
+        <pose>7 6 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>10 0.05 1.2</size></box>
+            <box><size>20 0.05 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -112,10 +90,10 @@
 
       <!-- Bottom edge (along X) -->
       <link name="edge_bottom">
-        <pose>2 -3 0.6 0 0 0</pose>
+        <pose>7 -6 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>10 0.05 1.2</size></box>
+            <box><size>20 0.05 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -129,7 +107,7 @@
         <pose>-3 0 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>0.05 6 1.2</size></box>
+            <box><size>0.05 12 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -140,10 +118,10 @@
 
       <!-- Right edge (along Y) -->
       <link name="edge_right">
-        <pose>7 0 0.6 0 0 0</pose>
+        <pose>17 0 0.6 0 0 0</pose>
         <visual name="visual">
           <geometry>
-            <box><size>0.05 6 1.2</size></box>
+            <box><size>0.05 12 1.2</size></box>
           </geometry>
           <material>
             <ambient>1 0.85 0 1</ambient>
@@ -153,260 +131,20 @@
       </link>
     </model>
 
-    <!-- ==== Chair beside ramp ==== -->
-    <!-- Chair include commented out so we can place poles instead
+
+    <!-- ==== Chair (left side, x = -1.5) ==== -->
     <include>
+      <name>chair</name>
+      <pose>4.0 2.5 0 0 0 0</pose>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair</uri>
-      <name>imported_chair</name>
-      <pose>1.6 1.2 0 0 0 3.1416</pose>
-      <static>true</static>
     </include>
-    -->
 
-    <!-- ==== Seven static cylindrical poles (0.6 m tall, 0.1 m diameter) ==== -->
-    <!-- Positions chosen to avoid the ramp at x~4,y~-1 (approx. excluded box x:[2.5,5.5], y:[-1.5,-0.5]) -->
-    <model name="pole_1">
-      <static>true</static>
-      <pose>3 1.8 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
+    <!-- ==== Prius Hybrid (right side, x = 2.5) ==== -->
+    <include>
+      <name>prius</name>
+      <pose>4.0 -2.5 0 0 0 0</pose>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Prius Hybrid</uri>
+    </include>
 
-    <model name="pole_2">
-      <static>true</static>
-      <pose>1.7 1.8 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="pole_3">
-      <static>true</static>
-      <pose>0.5 -2.0 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="pole_4">
-      <static>true</static>
-      <pose>3.5 2.5 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="pole_5">
-      <static>true</static>
-      <pose>6.0 -2.5 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="pole_6">
-      <static>true</static>
-      <pose>5.8 1.8 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="pole_7">
-      <static>true</static>
-      <pose>1.6 0.5 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="pole_8">
-      <static>true</static>
-      <pose>3.2 0.5 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-    <!--
-    <model name="pole_10">
-      <static>true</static>
-      <pose>0.7 0 1.755 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.4 0.25 0.1 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.15</radius>
-              <length>3.51</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-    -->
   </world>
 </sdf>

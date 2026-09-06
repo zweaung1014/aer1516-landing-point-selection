@@ -39,7 +39,7 @@ function spawn_model() {
 
 	echo "Spawning ${MODEL}_${N} at ${X} ${Y}"
 
-    gz service -s /world/${world}/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 300 --req 'sdf_filename: "/tmp/'${MODEL}_${N}'.sdf", pose: {position: {x:'${X}', y:'${Y}', z: 1.0}}, name: "'${MODEL}_${N}'", allow_renaming: 1'
+    gz service -s /world/${world}/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 300 --req 'sdf_filename: "/tmp/'${MODEL}_${N}'.sdf", pose: {position: {x:'${X}', y:'${Y}', z: 1.34128}}, name: "'${MODEL}_${N}'", allow_renaming: 1'
 	
 	echo "starting instance $N in $(pwd)"
 	$build_path/cf2 $((19950+${N})) > out.log 2> error.log &

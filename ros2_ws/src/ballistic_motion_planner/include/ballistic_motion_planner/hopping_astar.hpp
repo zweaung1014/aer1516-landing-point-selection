@@ -38,7 +38,7 @@ struct PlannerParams
   double arc_max_step = 0.05;
   // Energy chain.
   double mass = 0.8;
-  double eta = 0.7;
+  double eta = 0.8;
   double e_inject_max = 7.848;
   double min_apex = 0.3;
   double h_initial = 1.0;

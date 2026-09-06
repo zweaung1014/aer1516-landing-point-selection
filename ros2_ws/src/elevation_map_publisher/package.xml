@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>ballistic_motion_planner</name>
+  <name>elevation_map_publisher</name>
   <version>0.1.0</version>
-  <description>2.5D ballistic hopping A* motion planner (C++ port of hopcopter-ballistic-planning) planning on a grid_map elevation map.</description>
+  <description>Publishes a known 2.5D elevation map as grid_map_msgs/GridMap. Will later be extended to build the map from the LiDAR point cloud.</description>
   <maintainer email="zweminhtetaung@gmail.com">zweminhtetaung</maintainer>
   <license>Apache-2.0</license>
 
@@ -13,8 +13,6 @@
   <depend>grid_map_core</depend>
   <depend>grid_map_ros</depend>
   <depend>grid_map_msgs</depend>
-  <depend>visualization_msgs</depend>
-  <depend>geometry_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

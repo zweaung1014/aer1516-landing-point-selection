@@ -187,6 +187,15 @@ class hopcopter(Node):
             self.trajectory_callback,
             10
         )
+
+        # Subscribe to trajectory from the ballistic motion planner (same
+        # Marker id=400 contract; only one planner runs at a time)
+        self.ballistic_trajectory_sub = self.create_subscription(
+            Marker,
+            '/ballistic_trajectory',
+            self.trajectory_callback,
+            10
+        )
         
         # Subscribe to trajectory start position from RRT* planner for follower-gating
         self.traj_start_sub = self.create_subscription(
@@ -443,15 +452,16 @@ class hopcopter(Node):
         """Load the next waypoint from the list as the current goal (pops index 0)"""
         if len(self.waypoint_list) > 0:
             waypoint = self.waypoint_list.pop(0)  # Remove and return first element
-            # Ignore the z component from trajectory; enforce desired_z=0.8
-            wx, wy, _wz = waypoint
+            # Use the waypoint's z (terrain elevation + hover offset from the
+            # planner; 0.8 on flat ground, matching the old hardcoded value)
+            wx, wy, wz = waypoint
             self.desired_x = wx
             self.desired_y = wy
-            self.desired_z = 0.8
+            self.desired_z = wz
             self.desired_yaw = 0.0  # Keep yaw at 0 as requested
             self.has_active_goal = True
             # Store this as the last waypoint position
-            self.last_waypoint_position = (self.desired_x, self.desired_y, 0.8)
+            self.last_waypoint_position = (self.desired_x, self.desired_y, wz)
             self.get_logger().info(f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}, z={self.desired_z:.3f}")
             
             # Publish visited waypoint so local planner can log it to CSV
@@ -460,13 +470,12 @@ class hopcopter(Node):
             visited_msg.header.frame_id = 'world'
             visited_msg.point.x = float(wx)
             visited_msg.point.y = float(wy)
-            visited_msg.point.z = 0.8
+            visited_msg.point.z = float(wz)
             self.visited_waypoint_pub.publish(visited_msg)
         else:
             # No more waypoints - hold the last position if we had one
             if self.last_waypoint_position is not None:
-                self.desired_x, self.desired_y, _z = self.last_waypoint_position
-                self.desired_z = 0.8
+                self.desired_x, self.desired_y, self.desired_z = self.last_waypoint_position
                 self.desired_yaw = 0.0
                 self.get_logger().info(f"All waypoints completed - holding last position: x={self.desired_x:.3f}, y={self.desired_y:.3f}, z={self.desired_z:.3f}")
             self.has_active_goal = False
@@ -623,8 +632,7 @@ class hopcopter(Node):
                 self.desired_yaw = 0.0
         else:
             if self.last_waypoint_position is not None:
-                self.desired_x, self.desired_y, _z = self.last_waypoint_position
-                self.desired_z = 0.8
+                self.desired_x, self.desired_y, self.desired_z = self.last_waypoint_position
                 self.desired_yaw = 0.0
         
         self.desired_x_dot, self.desired_y_dot, self.desired_z_dot = 0, 0, 0

@@ -134,6 +134,17 @@ class hopcopter(Node):
         self.powered_climbing_thrust = 21000 # might need to tune this, was 15000
         self.ready_to_drop = True
 
+        # Per-hop energy tracking (configurable)
+        self.apex_deduction = 0.34128  # subtracted from raw apex z to get hop height
+        self.hop_mass = 0.3609         # kg, for PE/KE bookkeeping
+        self.hop_g = 9.8               # m/s^2, for PE/KE bookkeeping
+        self.hop_number = 0
+        self._arc_max_z = None            # running max base z since last touchdown (apex it fell from)
+        self._prev_speed = 0.0            # 3D speed one tick ago (pre-impact landing speed)
+        self._climb_energy_injection = 0.0  # propeller work injected in the climb after a touchdown
+        self._climb_peak_speed = 0.0        # peak 3D speed during that climb (takeoff velocity)
+        self._pending_hop_row = None        # row opened at touchdown, finalized at next apex
+
         # Initiate ROS2 publisher
         self.rpyt = self.create_publisher(Twist, '/cf_1/cmd_vel_legacy', 50)
 
@@ -278,6 +289,26 @@ class hopcopter(Node):
             'foot_x', 'foot_y', 'foot_z',
         ])
         self.get_logger().info(f'Landing-point CSV: {csv_filename}')
+
+        # === Per-hop energy-tracking CSV logger ===
+        hop_dir = '/home/zweminhtetaung/CrazySim/data/data_ballistic_planner/hop_tracking'
+        os.makedirs(hop_dir, exist_ok=True)
+        hop_csv_filename = os.path.join(
+            hop_dir,
+            f"hopcopter_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+        )
+        self.hop_csv_file = open(hop_csv_filename, 'w', newline='')
+        self.hop_csv_writer = csv.writer(self.hop_csv_file)
+        self.hop_csv_writer.writerow([
+            'timestamp', 'hop_number',
+            'land_x', 'land_y', 'land_z',
+            'roll_deg', 'pitch_deg', 'yaw_deg',
+            'previous_apex_h', 'potential_energy_J',
+            'landing_velocity_mps', 'landing_ke_J',
+            'takeoff_velocity_mps', 'takeoff_ke_J',
+            'energy_injection_J',
+        ])
+        self.get_logger().info(f'Hop-tracking CSV: {hop_csv_filename}')
         
     # ------------------------------------------------------------------
     #  Compute foot contact position in world frame
@@ -299,6 +330,17 @@ class hopcopter(Node):
         foot_y = pos_y + leg_world[1]
         foot_z = pos_z + leg_world[2]
         return foot_x, foot_y, foot_z
+
+    def _total_prop_force(self):
+        """Total upward propeller force [N] from the four motor PWMs, using the
+        Gazebo MulticopterMotorModel: omega=0.04076521*pwm+380.8359, F=k*omega^2."""
+        k = 28e-8
+        total = 0.0
+        for pwm in (self.motor_m1, self.motor_m2, self.motor_m3, self.motor_m4):
+            if pwm >= 1000:
+                omega = 0.04076521 * pwm + 380.8359
+                total += k * omega * omega
+        return total
 
     def gz_odom_velocity(self, msg: Odometry) -> None:
         """
@@ -717,6 +759,16 @@ class hopcopter(Node):
         if not self.flight_enable and self.controller_start_flag:
             # jumping state tracking
             self.JSTO.step(self.az, self.Diff_Z.data_rate) # pass acceleration in the z direction
+
+            # Per-hop tracking: apex is the running max base z between touchdowns
+            if self._arc_max_z is None or self.pos_z > self._arc_max_z:
+                self._arc_max_z = self.pos_z
+            # Accumulate propeller energy + peak speed during the powered climb
+            if self.JSTO.jumping_state == 3:
+                self._climb_energy_injection += self._total_prop_force() * self.vel_z * self.sample_time
+                speed_3d = math.sqrt(self.vel_x**2 + self.vel_y**2 + self.vel_z**2)
+                if speed_3d > self._climb_peak_speed:
+                    self._climb_peak_speed = speed_3d
             
             # === Local Planner Integration: Publish jumping state and queue state ===
             # Publish current jumping state for local planner
@@ -784,6 +836,25 @@ class hopcopter(Node):
                 ])
                 self.csv_file.flush()
 
+                # --- Open per-hop tracking row (finalized at the next apex) ---
+                self.hop_number += 1
+                apex_z = self._arc_max_z if self._arc_max_z is not None else self.pos_z
+                previous_apex_h = apex_z - self.apex_deduction
+                pe = self.hop_mass * self.hop_g * previous_apex_h
+                landing_v = self._prev_speed
+                landing_ke = 0.5 * self.hop_mass * landing_v ** 2
+                self._pending_hop_row = [
+                    f'{time.time():.6f}', self.hop_number,
+                    f'{foot_x:.6f}', f'{foot_y:.6f}', f'{foot_z:.6f}',
+                    f'{euler[2]:.4f}', f'{-euler[1]:.4f}', f'{euler[0]:.4f}',
+                    f'{previous_apex_h:.6f}', f'{pe:.6f}',
+                    f'{landing_v:.6f}', f'{landing_ke:.6f}',
+                ]
+                # Reset accumulators for the arc that starts at this touchdown
+                self._arc_max_z = self.pos_z
+                self._climb_energy_injection = 0.0
+                self._climb_peak_speed = 0.0
+
             # run jumping controller after the apex
             if self.JSTO.jumping_state_old == 3 and self.JSTO.jumping_state == 1:
                 jumping_height_record = Z_f - self.leg_length
@@ -804,6 +875,18 @@ class hopcopter(Node):
 
                     # Stance phase model - calculate landing attitude and roll/pitch commands
                     self.LJC.inverse_jumping_model(gzgt_robot_euler[0], Abs_time) # calculate landing attitude
+
+                # --- Finalize per-hop row with this arc's takeoff velocity + injection ---
+                if self._pending_hop_row is not None:
+                    takeoff_v = self._climb_peak_speed
+                    takeoff_ke = 0.5 * self.hop_mass * takeoff_v ** 2
+                    self._pending_hop_row.extend([
+                        f'{takeoff_v:.6f}', f'{takeoff_ke:.6f}',
+                        f'{self._climb_energy_injection:.6f}',
+                    ])
+                    self.hop_csv_writer.writerow(self._pending_hop_row)
+                    self.hop_csv_file.flush()
+                    self._pending_hop_row = None
 
         # Determine state and assign the appropriate commands
         if self.controller_start_flag:
@@ -849,6 +932,9 @@ class hopcopter(Node):
         
         # Publish the RPYT commands
         self.rpyt.publish(self.msg)
+
+        # Remember this tick's 3D speed for next tick's pre-impact landing velocity
+        self._prev_speed = math.sqrt(self.vel_x**2 + self.vel_y**2 + self.vel_z**2)
     
 def main():
     print("Running node")
@@ -862,6 +948,9 @@ def main():
         # Close the landing-point CSV file
         if hasattr(node, 'csv_file') and not node.csv_file.closed:
             node.csv_file.close()
+        # Close the hop-tracking CSV file
+        if hasattr(node, 'hop_csv_file') and not node.hop_csv_file.closed:
+            node.hop_csv_file.close()
     node.destroy_node()
     rclpy.shutdown()
 

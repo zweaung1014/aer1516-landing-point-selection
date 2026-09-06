@@ -47,7 +47,6 @@ public:
     // v_g_max and V_max are derived from formulas so parity stays exact).
     p_.g = declare_parameter("physics.g", 9.81);
     p_.mass = declare_parameter("physics.mass", 0.8);
-    // 0.8 = ~80% of apex PE retained per hop (sim-measured); 20% loss.
     p_.eta = declare_parameter("physics.eta", 0.8);
     p_.h_initial = declare_parameter("physics.h_initial", 1.0);
     p_.min_apex = declare_parameter("physics.min_apex", 0.3);

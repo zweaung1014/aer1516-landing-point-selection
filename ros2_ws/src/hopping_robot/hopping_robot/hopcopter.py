@@ -22,6 +22,8 @@ from hopping_robot.RisLib.cflog import LoggingCore
 from functools import partial
 from sensor_msgs.msg import Imu
 from visualization_msgs.msg import Marker
+from grid_map_msgs.msg import GridMap
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
 
 import csv
 import os
@@ -186,8 +188,23 @@ class hopcopter(Node):
         # Initialize desired positions as None until trajectory is received
         self.desired_x = None
         self.desired_y = None
-        self.desired_z = 0.8  # Always keep altitude command at 0.8 m
+        # desired_rel_z is the constant hop height above the current ground;
+        # desired_z is that height plus the ground elevation under the robot.
+        self.desired_rel_z = 0.8
+        self.desired_z = 0.8
         self.desired_yaw = 0.0
+
+        # Ground elevation under the robot, read from /elevation_map at its XY;
+        # 0.0 until a map arrives (flat-ground fallback keeps desired_z at 0.8).
+        self.current_ground_z = 0.0
+        self._emap_data = None       # flat float array of the "elevation" layer
+        self._emap_res = 0.0
+        self._emap_cx = 0.0          # map center (world) x
+        self._emap_cy = 0.0          # map center (world) y
+        self._emap_nrows = 0         # cells along x
+        self._emap_ncols = 0         # cells along y
+        self._emap_outer_start = 0
+        self._emap_inner_start = 0
         
         # Trajectory start position tracking for follower-gating
         self.trajectory_start_x = 0.0
@@ -235,6 +252,21 @@ class hopcopter(Node):
             '/local_planner/adjusted_waypoint',
             self.adjusted_waypoint_callback,
             10
+        )
+
+        # Subscribe to the 2.5D elevation map (transient_local to catch the
+        # latched map published before this node starts)
+        emap_qos = QoSProfile(
+            depth=1,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.elevation_map_sub = self.create_subscription(
+            GridMap,
+            '/elevation_map',
+            self.elevation_map_callback,
+            emap_qos
         )
 
         # Create a timer for publisher
@@ -392,6 +424,53 @@ class hopcopter(Node):
         # optional: timestamp in seconds (float)
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
+    def elevation_map_callback(self, msg: GridMap) -> None:
+        """Cache the 'elevation' layer of the 2.5D map for ground lookups."""
+        try:
+            if 'elevation' not in msg.layers:
+                return
+            layer_idx = list(msg.layers).index('elevation')
+            arr = msg.data[layer_idx]
+            # grid_map stores column-major: outer dim = columns (y), inner = rows (x)
+            if len(arr.layout.dim) >= 2:
+                ncols = arr.layout.dim[0].size
+                nrows = arr.layout.dim[1].size
+            else:
+                nrows = int(round(msg.info.length_x / msg.info.resolution))
+                ncols = int(round(msg.info.length_y / msg.info.resolution))
+            self._emap_res = msg.info.resolution
+            self._emap_cx = msg.info.pose.position.x
+            self._emap_cy = msg.info.pose.position.y
+            self._emap_nrows = nrows
+            self._emap_ncols = ncols
+            self._emap_outer_start = msg.outer_start_index
+            self._emap_inner_start = msg.inner_start_index
+            self._emap_data = np.asarray(arr.data, dtype=np.float64)
+        except Exception as e:
+            self.get_logger().error(f"Error in elevation_map_callback: {e}")
+
+    def _ground_elevation_at(self, x, y):
+        """Nearest-cell ground elevation at world (x, y) from the 2.5D map.
+
+        Returns the last known ground z when there is no map, the query falls
+        outside it, or the cell is an obstacle (NaN on the wire)."""
+        if self._emap_data is None or self._emap_res <= 0.0:
+            return self.current_ground_z
+        res = self._emap_res
+        nrows, ncols = self._emap_nrows, self._emap_ncols
+        # grid_map index convention: index 0 sits at the max-x/max-y corner, so
+        # increasing row/col index moves toward decreasing world x/y.
+        ru = int(round(0.5 * (nrows - 1) - (x - self._emap_cx) / res))
+        cu = int(round(0.5 * (ncols - 1) - (y - self._emap_cy) / res))
+        if ru < 0 or ru >= nrows or cu < 0 or cu >= ncols:
+            return self.current_ground_z
+        rb = (ru + self._emap_inner_start) % nrows
+        cb = (cu + self._emap_outer_start) % ncols
+        z = self._emap_data[cb * nrows + rb]
+        if not math.isfinite(z):
+            return self.current_ground_z
+        return float(z)
+
     def trajectory_start_callback(self, msg: PoseStamped) -> None:
         """Handle trajectory start position from RRT* planner for follower-gating"""
         try:
@@ -497,17 +576,16 @@ class hopcopter(Node):
         """Load the next waypoint from the list as the current goal (pops index 0)"""
         if len(self.waypoint_list) > 0:
             waypoint = self.waypoint_list.pop(0)  # Remove and return first element
-            # Use the waypoint's z (terrain elevation + hover offset from the
-            # planner; 0.8 on flat ground, matching the old hardcoded value)
+            # Goals are XY-only; the waypoint's z is ignored (desired_z tracks
+            # the ground under the robot, computed each control tick).
             wx, wy, wz = waypoint
             self.desired_x = wx
             self.desired_y = wy
-            self.desired_z = wz
             self.desired_yaw = 0.0  # Keep yaw at 0 as requested
             self.has_active_goal = True
-            # Store this as the last waypoint position
-            self.last_waypoint_position = (self.desired_x, self.desired_y, wz)
-            self.get_logger().info(f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}, z={self.desired_z:.3f}")
+            # Store this as the last waypoint position (XY only)
+            self.last_waypoint_position = (self.desired_x, self.desired_y)
+            self.get_logger().info(f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}")
             
             # Publish visited waypoint so local planner can log it to CSV
             visited_msg = PointStamped()
@@ -520,9 +598,9 @@ class hopcopter(Node):
         else:
             # No more waypoints - hold the last position if we had one
             if self.last_waypoint_position is not None:
-                self.desired_x, self.desired_y, self.desired_z = self.last_waypoint_position
+                self.desired_x, self.desired_y = self.last_waypoint_position
                 self.desired_yaw = 0.0
-                self.get_logger().info(f"All waypoints completed - holding last position: x={self.desired_x:.3f}, y={self.desired_y:.3f}, z={self.desired_z:.3f}")
+                self.get_logger().info(f"All waypoints completed - holding last position: x={self.desired_x:.3f}, y={self.desired_y:.3f}")
             self.has_active_goal = False
             self.get_logger().info("All waypoints completed")
     
@@ -673,13 +751,17 @@ class hopcopter(Node):
             # No trajectory received yet - keep robot stationary at current position
             if self.desired_x is None:  # First time initialization
                 self.desired_x, self.desired_y = self.pos_x, self.pos_y
-                self.desired_z = 0.8
                 self.desired_yaw = 0.0
         else:
             if self.last_waypoint_position is not None:
-                self.desired_x, self.desired_y, self.desired_z = self.last_waypoint_position
+                self.desired_x, self.desired_y = self.last_waypoint_position
                 self.desired_yaw = 0.0
-        
+
+        # Altitude target = constant hop height above the ground the robot is
+        # currently standing on (2.5D elevation map lookup at its XY).
+        self.current_ground_z = self._ground_elevation_at(self.pos_x, self.pos_y)
+        self.desired_z = self.current_ground_z + self.desired_rel_z
+
         self.desired_x_dot, self.desired_y_dot, self.desired_z_dot = 0, 0, 0
 
         # Flight controller
@@ -716,8 +798,7 @@ class hopcopter(Node):
             # Calculate distance to current goal
             distance_to_goal = math.sqrt(
                 (X_f - self.desired_x)**2 + 
-                (Y_f - self.desired_y)**2 + 
-                (Z_f - self.desired_z)**2
+                (Y_f - self.desired_y)**2
             )
             
             # Check if goal is reached within tolerance
@@ -866,7 +947,7 @@ class hopcopter(Node):
                     landing_speed_z = - self.G_flight_time_mocap * falling_time
 
                     self.JHC.update_apex_state(Abs_time, self.Diff_X.data_rate, self.Diff_Y.data_rate)
-                    self.JSTO.powered_climbing_end_timer = self.JHC.step(self.desired_z)
+                    self.JSTO.powered_climbing_end_timer = self.JHC.step(self.desired_rel_z)
 
                     self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
                                        self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)

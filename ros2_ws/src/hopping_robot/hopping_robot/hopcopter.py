@@ -41,28 +41,6 @@ from hopping_robot.JumpLib.jumping_model import InPlaneJumpingModel
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
 
-
-# class RealTimeSleeper:
-#     def __init__(self, sample_time):
-#         self._sample_time = sample_time
-#         self.loop_start_time = time.time()
-#         self.loop_flag = 0
-
-#     def init(self):
-#         self.loop_start_time = time.time()
-
-#     def sleep(self):
-#         self.loop_flag = self.loop_flag + 1
-#         current_time = time.time()
-
-#         loop_end_time = (self.loop_start_time + self._sample_time)
-#         sleep_time = loop_end_time - current_time
-#         if sleep_time > 0:
-#             time.sleep(sleep_time)
-#         else:
-#             print('warning: loop frequency lower than expected!')
-#         self.loop_start_time = time.time()
-
 class Differentiator:
     def __init__(self, diff_steps):
         self.t_queue = deque([0] * diff_steps, maxlen=diff_steps)

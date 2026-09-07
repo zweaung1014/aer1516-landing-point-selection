@@ -157,6 +157,9 @@ class hopcopter(Node):
         self.imu = self.create_subscription(LogDataGeneric, '/cf_1/imu', self.motorPower, 50)
         self.motor_m1, self.motor_m2, self.motor_m3, self.motor_m4 = 0.0, 0.0, 0.0, 0.0
 
+        ## Motor PWM feedback (motor.m1..m4), logged by crazyswarm2 as 'motorpower'.
+        self.motorpower = self.create_subscription(LogDataGeneric, '/cf_1/motorpower', self.motorPower, 50)
+
         # This is used to obtain acceleration from Gazebo ground truth
         self.gz_imu = self.create_subscription(Imu, '/cf_0/imu', self.gz_imu_acceleration, 50)
         self.ax = self.ay = self.az = 0.0

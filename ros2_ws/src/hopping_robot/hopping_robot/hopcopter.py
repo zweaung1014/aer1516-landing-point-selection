@@ -8,12 +8,10 @@ from collections import deque
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Pose, Point, PointStamped, PoseArray
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseStamped, Twist, AccelStamped
 from crazyflie_interfaces.msg import LogDataGeneric, FullState
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Int8
 import sys
 from scipy.spatial.transform import Rotation
 from hopping_robot.RisLib.standard_pid import PidControlRaw
@@ -172,7 +170,7 @@ class hopcopter(Node):
         self.pos_x, self.pos_y, self.pos_z = 0.0, 0.0, 0.0
         self.ori_x, self.ori_y, self.ori_z, self.ori_w = 0.0, 0.0, 0.0, 0.0
 
-        # Trajectory following variables - using list for O(1) index access (local planner needs this)
+        # Trajectory following variables
         self.waypoint_list = []  # List of (x, y, z) tuples
         self.current_goal_tolerance = 0.4  # meters - configurable tolerance
         self.has_active_goal = False
@@ -180,10 +178,6 @@ class hopcopter(Node):
         self.last_waypoint_position = None  # Store last completed waypoint
         self.pending_new_traj = False       # True between DELETE and ADD to avoid jumps
         self.trajectory_received = False    # Only allow control after first trajectory received
-        
-        # Local planner integration - jumping state tracking for external nodes
-        self.prev_jumping_state = 0  # Track state transitions
-        self.queue_state_published_this_cycle = False  # Ensure single publish per jump cycle
         
         # Initialize desired positions as None until trajectory is received
         self.desired_x = None
@@ -211,16 +205,8 @@ class hopcopter(Node):
         self.trajectory_start_y = 0.0
         self.trajectory_start_received = False
         
-        # Subscribe to trajectory from OMPL RRT* planner
-        self.trajectory_sub = self.create_subscription(
-            Marker,
-            '/ompl_rrt_star_trajectory',
-            self.trajectory_callback,
-            10
-        )
-
-        # Subscribe to trajectory from the ballistic motion planner (same
-        # Marker id=400 contract; only one planner runs at a time)
+        # Subscribe to trajectory from the ballistic motion planner
+        # (Marker id=400 contract)
         self.ballistic_trajectory_sub = self.create_subscription(
             Marker,
             '/ballistic_trajectory',
@@ -228,29 +214,11 @@ class hopcopter(Node):
             10
         )
         
-        # Subscribe to trajectory start position from RRT* planner for follower-gating
+        # Subscribe to trajectory start position from the ballistic planner for follower-gating
         self.traj_start_sub = self.create_subscription(
             PoseStamped,
             '/trajectory_start_position',
             self.trajectory_start_callback,
-            10
-        )
-        
-        # === Local Planner Integration ===
-        # Publisher for jumping state (Int8: 1=falling, 2=stance, 3=climbing)
-        self.jumping_state_pub = self.create_publisher(Int8, '/jumping_state', 10)
-        
-        # Publisher for trajectory queue state (PoseArray: [0]=current_goal, [1]=next_waypoint if exists)
-        self.queue_state_pub = self.create_publisher(PoseArray, '/trajectory_queue_state', 10)
-        
-        # Publisher for visited waypoints (PointStamped: every waypoint the robot targets)
-        self.visited_waypoint_pub = self.create_publisher(PointStamped, '/visited_waypoint', 10)
-        
-        # Subscriber for adjusted waypoint from local planner
-        self.adjusted_waypoint_sub = self.create_subscription(
-            PointStamped,
-            '/local_planner/adjusted_waypoint',
-            self.adjusted_waypoint_callback,
             10
         )
 
@@ -472,7 +440,7 @@ class hopcopter(Node):
         return float(z)
 
     def trajectory_start_callback(self, msg: PoseStamped) -> None:
-        """Handle trajectory start position from RRT* planner for follower-gating"""
+        """Handle trajectory start position from the ballistic planner for follower-gating"""
         try:
             self.trajectory_start_x = msg.pose.position.x
             self.trajectory_start_y = msg.pose.position.y
@@ -482,7 +450,7 @@ class hopcopter(Node):
             self.get_logger().error(f"Error in trajectory_start_callback: {e}")
 
     def trajectory_callback(self, msg: Marker) -> None:
-        """Handle incoming trajectory messages from /ompl_rrt_star_trajectory"""
+        """Handle incoming trajectory messages from /ballistic_trajectory"""
         try:
             # Only accept trajectories labeled with id==400
             if msg.action == 0:
@@ -586,15 +554,6 @@ class hopcopter(Node):
             # Store this as the last waypoint position (XY only)
             self.last_waypoint_position = (self.desired_x, self.desired_y)
             self.get_logger().info(f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}")
-            
-            # Publish visited waypoint so local planner can log it to CSV
-            visited_msg = PointStamped()
-            visited_msg.header.stamp = self.get_clock().now().to_msg()
-            visited_msg.header.frame_id = 'world'
-            visited_msg.point.x = float(wx)
-            visited_msg.point.y = float(wy)
-            visited_msg.point.z = float(wz)
-            self.visited_waypoint_pub.publish(visited_msg)
         else:
             # No more waypoints - hold the last position if we had one
             if self.last_waypoint_position is not None:
@@ -604,85 +563,6 @@ class hopcopter(Node):
             self.has_active_goal = False
             self.get_logger().info("All waypoints completed")
     
-    def adjusted_waypoint_callback(self, msg: PointStamped) -> None:
-        """
-        Handle adjusted waypoint from local planner.
-        The waypoint index to modify is encoded in header.stamp.sec (index 0, 1, etc.)
-        """
-        try:
-            receive_time = time.time()
-            waypoint_index = msg.header.stamp.sec  # Index of waypoint to adjust
-            
-            if waypoint_index < len(self.waypoint_list):
-                old_wp = self.waypoint_list[waypoint_index]
-                new_wp = (msg.point.x, msg.point.y, old_wp[2])  # Keep original z
-                self.waypoint_list[waypoint_index] = new_wp
-                
-                # DEBUG: timing info
-                if hasattr(self, 'state3_start_time'):
-                    time_since_state3 = (receive_time - self.state3_start_time) * 1000
-                    self.get_logger().info(
-                        f"[TIMING] Adjusted waypoint received at {receive_time:.6f} ({time_since_state3:.1f}ms after state3 start) | "
-                        f"waypoint[{waypoint_index}]: ({old_wp[0]:.3f}, {old_wp[1]:.3f}) -> ({new_wp[0]:.3f}, {new_wp[1]:.3f})"
-                    )
-                else:
-                    self.get_logger().info(
-                        f"Local planner adjusted waypoint[{waypoint_index}]: "
-                        f"({old_wp[0]:.3f}, {old_wp[1]:.3f}) -> ({new_wp[0]:.3f}, {new_wp[1]:.3f})"
-                    )
-            else:
-                self.get_logger().warn(
-                    f"Local planner tried to adjust waypoint[{waypoint_index}] but list only has {len(self.waypoint_list)} items"
-                )
-        except Exception as e:
-            self.get_logger().error(f"Error in adjusted_waypoint_callback: {e}")
-    
-    def _publish_queue_state(self):
-        """
-        Publish current trajectory queue state for local planner.
-        PoseArray format:
-          - poses[0]: Current goal (desired_x, desired_y, desired_z) - the waypoint robot is heading toward
-          - poses[1]: Next waypoint (waypoint_list[0]) if exists - the one local planner should adjust
-        Position encodes (x, y, z), orientation.w encodes 1.0 if valid, 0.0 if not.
-        """
-        msg = PoseArray()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'world'
-        
-        # Pose 0: Current goal (what robot is heading toward now)
-        current_goal = Pose()
-        if self.desired_x is not None and self.desired_y is not None:
-            current_goal.position.x = float(self.desired_x)
-            current_goal.position.y = float(self.desired_y)
-            current_goal.position.z = float(self.desired_z)
-            current_goal.orientation.w = 1.0  # Valid flag
-        else:
-            current_goal.orientation.w = 0.0  # Invalid flag
-        msg.poses.append(current_goal)
-        
-        # Pose 1: Next waypoint (the one local planner should adjust)
-        next_waypoint = Pose()
-        if len(self.waypoint_list) > 0:
-            wp = self.waypoint_list[0]  # First item in list is next waypoint
-            next_waypoint.position.x = float(wp[0])
-            next_waypoint.position.y = float(wp[1])
-            next_waypoint.position.z = float(wp[2])
-            next_waypoint.orientation.w = 1.0  # Valid flag
-        else:
-            next_waypoint.orientation.w = 0.0  # Invalid flag - no next waypoint
-        msg.poses.append(next_waypoint)
-        
-        self.queue_state_pub.publish(msg)
-        self.get_logger().debug(
-            f"Published queue state: current_goal=({current_goal.position.x:.2f}, {current_goal.position.y:.2f}), "
-            f"next_wp_valid={next_waypoint.orientation.w > 0.5}"
-        )
-
-        # # debug print (disable with ROS log level if too chatty)
-        # self.get_logger().debug(
-        #     f"[{t:.3f}] IMU acc: x={self.ax:.3f}, y={self.ay:.3f}, z={self.az:.3f}"
-        # )
-        
     def motorPower(self, msg):
         """
         Store the four PWM values that arrive in the same order you
@@ -853,38 +733,6 @@ class hopcopter(Node):
                 speed_3d = math.sqrt(self.vel_x**2 + self.vel_y**2 + self.vel_z**2)
                 if speed_3d > self._climb_peak_speed:
                     self._climb_peak_speed = speed_3d
-            
-            # === Local Planner Integration: Publish jumping state and queue state ===
-            # Publish current jumping state for local planner
-            jumping_state_msg = Int8()
-            jumping_state_msg.data = self.JSTO.jumping_state
-            self.jumping_state_pub.publish(jumping_state_msg)
-            
-            # Detect transition TO state 3 (takeoff) - publish queue state once
-            if self.prev_jumping_state != 3 and self.JSTO.jumping_state == 3:
-                self.queue_state_published_this_cycle = False  # Reset flag for new jump cycle
-                self.state3_start_time = time.time()  # DEBUG: record state 3 start time
-                self.get_logger().info(f"[TIMING] State 3 START at {self.state3_start_time:.6f}")
-            
-            # Detect transition FROM state 3 TO state 1 (apex reached, start falling)
-            if self.prev_jumping_state == 3 and self.JSTO.jumping_state == 1:
-                state1_start_time = time.time()
-                if hasattr(self, 'state3_start_time'):
-                    state3_duration = state1_start_time - self.state3_start_time
-                    self.get_logger().info(f"[TIMING] State 1 START at {state1_start_time:.6f} (state3 lasted {state3_duration*1000:.1f}ms)")
-            
-            # Publish queue state once at the START of state 3
-            if self.JSTO.jumping_state == 3 and not self.queue_state_published_this_cycle:
-                queue_pub_time = time.time()
-                self._publish_queue_state()
-                self.queue_state_published_this_cycle = True
-                if hasattr(self, 'state3_start_time'):
-                    delay_from_state3 = (queue_pub_time - self.state3_start_time) * 1000
-                    self.get_logger().info(f"[TIMING] Queue state published at {queue_pub_time:.6f} ({delay_from_state3:.1f}ms after state3 start)")
-            
-            # Track state for transition detection
-            self.prev_jumping_state = self.JSTO.jumping_state
-            # === End Local Planner Integration ===
 
             if self.ready_to_drop:
                 self.jumping_counter = 0

@@ -19,14 +19,8 @@ Terminal (user types NL command)
            │  /goal_pose
            ▼
 ┌────────────────────────────┐
-│  rrt_star_planner          │  Plans collision-free path
-│  → /ompl_rrt_star_trajectory│
-└──────────┬─────────────────┘
-           ▼
-┌────────────────────────────┐
-│  local_planner             │  Adjusts waypoints for terrain
-│  → /local_planner/         │
-│    adjusted_waypoint       │
+│  ballistic_planner_node    │  Plans hopping A* path (2.5D)
+│  → /ballistic_trajectory   │
 └──────────┬─────────────────┘
            ▼
 ┌────────────────────────────┐
@@ -104,10 +98,10 @@ Type `quit`, `exit`, or `q` to stop. Ctrl+C also works.
 
 4. **Publish**: A `geometry_msgs/PoseStamped` message is published on `/goal_pose` with:
    - `header.frame_id = "world"`
-   - `pose.position.z = 0.3` (matches RRT* path height convention)
+   - `pose.position.z = 0.3` (matches the planner path height convention)
    - `pose.orientation.w = 1.0` (identity quaternion)
 
-5. **Downstream**: The existing `rrt_star_planner` node receives the goal via its `/goal_pose` subscription and triggers path planning. No modifications to downstream nodes are required.
+5. **Downstream**: The `ballistic_planner_node` receives the goal via its `/goal_pose` subscription and triggers path planning. No modifications to downstream nodes are required.
 
 ## Supported Command Formats
 

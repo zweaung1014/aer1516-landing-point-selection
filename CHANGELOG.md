@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.0.0] - 2026-09-07 - Ballistic A* Is the Only Planner
+
+### Removed
+- **`rrt_star_planner` package**: the OMPL RRT* 2D global planner (`rrt_star` node,
+  `/ompl_rrt_star_trajectory`, `/rrt_star_grid`) is deleted. The ballistic A* planner
+  (`ballistic_motion_planner`) is now the sole global planner.
+- **`local_planning` package**: the PCL landing-point scorer (`local_planner` node,
+  `/local_planner/adjusted_waypoint`, `/local_planner/markers`) is deleted.
+- **`hopcopter` local-planner wiring**: removed the `/ompl_rrt_star_trajectory`
+  subscription, the `/jumping_state`, `/trajectory_queue_state`, and `/visited_waypoint`
+  publishers, the `/local_planner/adjusted_waypoint` subscription, the
+  `adjusted_waypoint_callback` and `_publish_queue_state` methods, the in-loop
+  "Local Planner Integration" block, and the now-unused `Pose`/`Point`/`PointStamped`/
+  `PoseArray`/`Int8` imports.
+
+### Kept
+- `hopcopter` still subscribes to `/ballistic_trajectory` (Marker id=400) and
+  `/trajectory_start_position`, and `apply_follower_gating` still trims waypoints behind the
+  robot — both are shared with the ballistic planner (comments corrected).
+
+### Docs
+- `README.md`, `CLAUDE.md`, and `nlp_goal_interface/docs/NLP_INTEGRATION.md` rewritten to a
+  single 7-terminal ballistic pipeline (elevation map → ballistic planner → hopcopter).
+
+---
+
 ## [2.4.0] - 2026-03-24 - LiDAR Tilt for Landing Zone Coverage
 
 ### Changed

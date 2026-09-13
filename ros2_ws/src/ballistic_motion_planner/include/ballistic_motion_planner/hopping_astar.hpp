@@ -40,7 +40,7 @@ struct PlannerParams
   double mass = 0.8;
   double eta = 0.7;
   double e_inject_max = 7.848;
-  double min_apex = 0.3;
+  double min_apex = 0.7;
   double h_initial = 1.0;
   double V_g_max = 7.004;       // derive: sqrt(2 g MAX_LANDING_APEX)
   double speed_bin = 0.25;

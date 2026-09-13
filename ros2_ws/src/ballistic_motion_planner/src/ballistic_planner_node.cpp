@@ -49,7 +49,7 @@ public:
     p_.mass = declare_parameter("physics.mass", 0.8);
     p_.eta = declare_parameter("physics.eta", 0.7);
     p_.h_initial = declare_parameter("physics.h_initial", 1.0);
-    p_.min_apex = declare_parameter("physics.min_apex", 0.3);
+    p_.min_apex = declare_parameter("physics.min_apex", 0.7);
     p_.e_inject_max = declare_parameter("physics.e_inject_max", p_.mass * p_.g * 1.0);
     p_.mu = declare_parameter("physics.mu", 1.2);
     p_.V_g_max = declare_parameter("physics.v_g_max", std::sqrt(2.0 * p_.g * 2.0));

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **`ballistic_motion_planner` min apex height**: raised `physics.min_apex` from 0.3 m to
+  0.7 m, so every planned hop's arc must peak at least 0.7 m above the higher of its two
+  endpoints. Updated in both the ROS parameter default (`ballistic_planner_node.cpp`) and the
+  `PlannerParams` struct default (`hopping_astar.hpp`). The `parity_main.cpp` harness keeps
+  0.3 m on purpose — it mirrors the Python reference `config.py` for the parity check and must
+  stay in lock-step with it. Still below the first-hop validation ceiling
+  (`min_apex < R1/(4·mu) ≈ 0.833 m`), so `validate_params` continues to pass.
+
 ## [3.0.0] - 2026-09-07 - Ballistic A* Is the Only Planner
 
 ### Removed

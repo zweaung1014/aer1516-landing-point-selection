@@ -103,6 +103,13 @@ public:
         csv_dir_.c_str(), ec.message().c_str());
     }
 
+    planning_csv_dir_ = csv_dir_ + "/planning_tracking";
+    std::filesystem::create_directories(planning_csv_dir_, ec);
+    if (ec) {
+      RCLCPP_WARN(get_logger(), "Could not create CSV dir %s: %s",
+        planning_csv_dir_.c_str(), ec.message().c_str());
+    }
+
     RCLCPP_INFO(get_logger(),
       "Ballistic planner ready. Waiting for %s and /cf_1/pose; "
       "plans once per /goal_pose.", map_topic.c_str());
@@ -317,11 +324,41 @@ private:
         RCLCPP_ERROR(get_logger(), "Failed to open hops CSV in %s", csv_dir_.c_str());
       }
     }
+    // Planned per-hop tracking, mirroring hopcopter's executed-hop CSV so the
+    // two diff column-for-column. hops[i] is the edge path[i]->path[i+1], so
+    // its landing waypoint is path[i+1]. Energies use the planner's own mass/g.
+    {
+      std::ofstream f(planning_csv_dir_ + "/planned_hops_" + stamp.str() + ".csv");
+      if (f) {
+        f << "timestamp,hop_number,land_x,land_y,land_z,roll_deg,pitch_deg,yaw_deg,"
+             "previous_apex_h,potential_energy_J,landing_velocity_mps,landing_ke_J,"
+             "takeoff_velocity_mps,takeoff_ke_J,energy_injection_J\n"
+          << std::fixed << std::setprecision(6);
+        const double ts = now().seconds();
+        for (size_t i = 0; i < hops.size(); ++i) {
+          const auto & h = hops[i];
+          const auto & [lx, ly] = path[i + 1];
+          const auto [r, c] = map.world_to_grid(lx, ly);
+          const double land_z = map.at(r, c);  // ground, matches executed foot_z
+          const double pe = p_.mass * p_.g * h.apex_drop;
+          const double landing_ke = 0.5 * p_.mass * h.v_g * h.v_g;
+          const double takeoff_ke = 0.5 * p_.mass * h.v_s * h.v_s;
+          f << ts << "," << i + 1 << "," << lx << "," << ly << "," << land_z
+            << ",,,,"  // roll_deg,pitch_deg,yaw_deg blank (not modeled in planning)
+            << h.apex_drop << "," << pe << "," << h.v_g << "," << landing_ke << ","
+            << h.v_s << "," << takeoff_ke << "," << h.e_inject << "\n";
+        }
+      } else {
+        RCLCPP_ERROR(get_logger(), "Failed to open planned-hops CSV in %s",
+          planning_csv_dir_.c_str());
+      }
+    }
   }
 
   ballistic::PlannerParams p_;
   double hover_offset_;
   std::string csv_dir_;
+  std::string planning_csv_dir_;
 
   grid_map_msgs::msg::GridMap::SharedPtr latest_map_msg_;
   double robot_x_ = 0.0, robot_y_ = 0.0;

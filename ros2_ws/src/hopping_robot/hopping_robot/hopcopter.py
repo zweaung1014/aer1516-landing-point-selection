@@ -123,6 +123,12 @@ class hopcopter(Node):
         self._climb_peak_speed = 0.0        # peak 3D speed during that climb (takeoff velocity)
         self._pending_hop_row = None        # row opened at touchdown, finalized at next apex
 
+        # Warm-up: hop level in place for this many touchdowns after Play (counted by
+        # hop_number) before steering toward the goal, so the first steered hop falls
+        # from a steady apex
+        self.warmup_touchdowns = 2
+        self.steering_enabled = False
+
         # Initiate ROS2 publisher
         self.rpyt = self.create_publisher(Twist, '/cf_1/cmd_vel_legacy', 50)
 
@@ -767,6 +773,11 @@ class hopcopter(Node):
 
             # run jumping controller after the apex
             if self.JSTO.jumping_state_old == 3 and self.JSTO.jumping_state == 1:
+                if not self.steering_enabled and self.hop_number >= self.warmup_touchdowns:
+                    self.steering_enabled = True
+                    self.get_logger().info(
+                        f"Warm-up done ({self.hop_number} touchdowns); steering toward goal from this apex")
+
                 jumping_height_record = Z_f - self.leg_length
                 if True:
                     falling_time = math.sqrt(2 * jumping_height_record / self.G_flight_time_mocap)
@@ -777,14 +788,19 @@ class hopcopter(Node):
 
                     self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
                                        self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
-                    self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, ) # set desired x and y
-                    self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, ) #keep track of current state in real time
-                    
-                    # Plan ballistic trajectory
-                    self.LJC.jumping_planning()
+                    if self.steering_enabled:
+                        self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, ) # set desired x and y
+                        self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, ) #keep track of current state in real time
 
-                    # Stance phase model - calculate landing attitude and roll/pitch commands
-                    self.LJC.inverse_jumping_model(gzgt_robot_euler[0], Abs_time) # calculate landing attitude
+                        # Plan ballistic trajectory
+                        self.LJC.jumping_planning()
+
+                        # Stance phase model - calculate landing attitude and roll/pitch commands
+                        self.LJC.inverse_jumping_model(gzgt_robot_euler[0], Abs_time) # calculate landing attitude
+                    else:
+                        # Warm-up hop: fall level, in place
+                        self.LJC.roll = 0.0
+                        self.LJC.pitch = 0.0
 
                 # --- Finalize per-hop row with this arc's takeoff velocity + injection ---
                 if self._pending_hop_row is not None:

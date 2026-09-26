@@ -132,19 +132,6 @@
     </model>
 
 
-    <!-- ==== Chair (left side, x = -1.5) ==== -->
-    <include>
-      <name>chair</name>
-      <pose>4.0 2.5 0 0 0 0</pose>
-      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair</uri>
-    </include>
-
-    <!-- ==== Prius Hybrid (right side, x = 2.5) ==== -->
-    <include>
-      <name>prius</name>
-      <pose>4.0 -2.5 0 0 0 0</pose>
-      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Prius Hybrid</uri>
-    </include>
 
   </world>
 </sdf>

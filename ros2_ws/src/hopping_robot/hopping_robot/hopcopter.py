@@ -296,7 +296,24 @@ class hopcopter(Node):
             'energy_injection_J',
         ])
         self.get_logger().info(f'Hop-tracking CSV: {hop_csv_filename}')
-        
+
+        # === Per-tick commanded-vs-actual attitude CSV logger ===
+        att_dir = '/home/zweminhtetaung/CrazySim/data/data_ballistic_planner/position_attitude_tracking'
+        os.makedirs(att_dir, exist_ok=True)
+        att_csv_filename = os.path.join(
+            att_dir,
+            f"attitude_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+        )
+        self.att_csv_file = open(att_csv_filename, 'w', newline='')
+        self.att_csv_writer = csv.writer(self.att_csv_file)
+        self.att_csv_writer.writerow([
+            'timestamp', 'jumping_state', 'hop_number',
+            'des_roll_deg', 'des_pitch_deg', 'des_yaw_deg',
+            'act_roll_deg', 'act_pitch_deg', 'act_yaw_deg',
+        ])
+        self._att_rows = 0
+        self.get_logger().info(f'Attitude-tracking CSV: {att_csv_filename}')
+
     # ------------------------------------------------------------------
     #  Compute foot contact position in world frame
     # ------------------------------------------------------------------
@@ -842,6 +859,17 @@ class hopcopter(Node):
             self.condition_log.append("false")
             roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, 0, 0
 
+        # --- Log commanded vs actual attitude (yaw_flight is a rate, so log the yaw angle target) ---
+        self.att_csv_writer.writerow([
+            f'{time.time():.6f}', self.JSTO.jumping_state, self.hop_number,
+            f'{roll_flight:.4f}', f'{pitch_flight:.4f}', f'{math.degrees(self.desired_yaw):.4f}',
+            f'{math.degrees(gzgt_robot_euler[2]):.4f}', f'{-math.degrees(gzgt_robot_euler[1]):.4f}',
+            f'{math.degrees(gzgt_robot_euler[0]):.4f}',
+        ])
+        self._att_rows += 1
+        if self._att_rows % 100 == 0:
+            self.att_csv_file.flush()
+
         # Send those commands
         if self.first_loop == True:
             # Initiate by sending 0,0,0,0 first
@@ -877,6 +905,9 @@ def main():
         # Close the hop-tracking CSV file
         if hasattr(node, 'hop_csv_file') and not node.hop_csv_file.closed:
             node.hop_csv_file.close()
+        # Close the attitude-tracking CSV file
+        if hasattr(node, 'att_csv_file') and not node.att_csv_file.closed:
+            node.att_csv_file.close()
     node.destroy_node()
     rclpy.shutdown()
 

@@ -10,6 +10,13 @@
   0.3 m on purpose — it mirrors the Python reference `config.py` for the parity check and must
   stay in lock-step with it. Still below the first-hop validation ceiling
   (`min_apex < R1/(4·mu) ≈ 0.833 m`), so `validate_params` continues to pass.
+- **`ballistic_motion_planner` initial apex**: lowered `physics.h_initial` from 1.0 m to
+  0.8 m to match the 0.8 m hover height the robot starts hopping at. It seeds the energy chain:
+  the start cell's virtual landing speed drops from √(2g·1.0/η) ≈ 5.29 m/s to
+  √(2g·0.8/η) ≈ 4.73 m/s, so the first hop's reach shrinks from ≈ 3.97 m to ≈ 3.61 m. Updated
+  in both the ROS parameter default (`ballistic_planner_node.cpp`) and the `PlannerParams`
+  struct default (`hopping_astar.hpp`); `parity_main.cpp` keeps 1.0 m to stay in lock-step with
+  the Python reference. `validate_params` still passes (first-hop tan floor 0.833 < ceiling 1.0).
 
 ## [3.0.0] - 2026-09-07 - Ballistic A* Is the Only Planner
 

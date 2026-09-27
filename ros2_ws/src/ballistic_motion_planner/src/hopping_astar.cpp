@@ -48,10 +48,13 @@ void validate_params(const PlannerParams & p)
       v_s_min_1 * v_s_min_1 + 2.0 * p.e_inject_max / p.mass, p.V_max * p.V_max));
   const double R1 = v_s_max_1 * v_s_max_1 / p.g;
 
+  // At W = v_s_max_1^2 the target is exactly the max-range (45 deg) radius, so
+  // D is 0 analytically and rounding can push it to ~-1e-13 (e.g. h_initial =
+  // 0.8). Treat tiny negatives as 0 instead of as "unreachable".
   auto tan_hi = [&](double W) -> std::optional<double> {
       const double D = W * W - p.g * p.g * R1 * R1;
-      if (D < 0.0) {return std::nullopt;}
-      return (W + std::sqrt(D)) / (p.g * R1);
+      if (D < -1e-9 * W * W) {return std::nullopt;}
+      return (W + std::sqrt(std::max(0.0, D))) / (p.g * R1);
     };
 
   const double flat_disc = std::pow(p.V_max, 4) - p.g * p.g * R1 * R1;

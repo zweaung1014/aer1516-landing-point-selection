@@ -33,7 +33,7 @@ struct PlannerParams
   double mu = 1.2;
   double robot_radius = 0.03;
   double leg_length = 0.4;
-  double min_clearance_gate = 0.05;
+  double min_clearance_gate = 0.2;
   double steep_grade = 1.7320508075688772;  // tan(60 deg)
   double arc_max_step = 0.05;
   // Energy chain.

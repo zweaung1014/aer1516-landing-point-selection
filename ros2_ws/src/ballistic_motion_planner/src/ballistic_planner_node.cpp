@@ -63,7 +63,7 @@ public:
     p_.min_hop_radius = declare_parameter("search.min_hop_radius", 0.0);
     p_.robot_radius = declare_parameter("robot.radius", 0.03);
     p_.leg_length = declare_parameter("robot.leg_length", 0.4);
-    p_.min_clearance_gate = declare_parameter("robot.min_clearance", 0.05);
+    p_.min_clearance_gate = declare_parameter("robot.min_clearance", 0.2);
     p_.steep_grade = declare_parameter("clearance.steep_grade", std::tan(60.0 * M_PI / 180.0));
     p_.arc_max_step = declare_parameter("clearance.arc_max_step", 0.05);
     hover_offset_ = declare_parameter("output.hover_offset", 0.8);

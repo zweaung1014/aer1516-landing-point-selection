@@ -21,6 +21,9 @@ standard_pid_output_*.csv
 
 # Data CSV files (all subdirectories)
 data/**/*.csv
+# Planned-path snapshots + rendered figures (ballistic_planner_node)
+data/**/vis_planned_path/*.json
+data/**/vis_planned_path/*.png
 
 .vscode/*
 

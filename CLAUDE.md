@@ -100,7 +100,11 @@ planning time on `/trajectory_start_position`. Per-waypoint z is the **`target_a
 hop that lands on that waypoint — the planned apex height above that hop's takeoff ground
 (`apex_drop + Z`) — and `output.hover_offset` (0.8 m) for the start point, which no hop lands
 on. It is a relative height, not a world z. The node works entirely in the world frame and does
-not use TF or the LiDAR.
+not use TF or the LiDAR. Each plan also writes `snapshot_<stamp>.json` to
+`data/data_ballistic_planner/vis_planned_path/`. The node then starts
+`scripts/visualize_planned_path.py` in the background, which renders `planned_path_<stamp>.png`
+with the same layout as the reference `main.py`, plus a side view of each hop (arc, inflated
+terrain and clearance from the planner's own `arc_samples`). Turn this off with `output.render_png:=false`.
 
 **2. `hopcopter`** (`hopping_robot/hopping_robot/hopcopter.py`) owns the waypoint queue. It
 consumes the marker (id=400), holds `self.waypoint_list`, and pops the next target once the

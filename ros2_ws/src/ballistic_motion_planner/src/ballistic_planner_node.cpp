@@ -10,9 +10,13 @@
 //              /trajectory_start_position  (geometry_msgs/PoseStamped)
 // Plans exactly once per /goal_pose message; there is no replan timer.
 // CSVs (path + per-hop energy chain) go to data/data_ballistic_planner/.
+// A JSON snapshot (map layers + path + hop radii) goes to vis_planned_path/,
+// and scripts/visualize_planned_path.py renders it to a PNG in the background.
 
+#include <ament_index_cpp/get_package_prefix.hpp>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +34,7 @@
 #include <grid_map_ros/GridMapRosConverter.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
 
+#include "ballistic_motion_planner/ballistic_physics.hpp"
 #include "ballistic_motion_planner/hopping_astar.hpp"
 #include "ballistic_motion_planner/map2d5.hpp"
 
@@ -69,6 +74,8 @@ public:
     p_.arc_max_step = declare_parameter("clearance.arc_max_step", 0.05);
     // Target apex for the start point, which no planned hop lands on.
     hover_offset_ = declare_parameter("output.hover_offset", 0.8);
+    // Render each plan's snapshot to a PNG (vis_planned_path/) in the background.
+    render_png_ = declare_parameter("output.render_png", true);
     const auto map_topic = declare_parameter("topics.map", std::string("/elevation_map"));
     const auto traj_topic = declare_parameter("topics.trajectory", std::string("/ballistic_trajectory"));
 
@@ -110,6 +117,13 @@ public:
     if (ec) {
       RCLCPP_WARN(get_logger(), "Could not create CSV dir %s: %s",
         planning_csv_dir_.c_str(), ec.message().c_str());
+    }
+
+    vis_dir_ = csv_dir_ + "/vis_planned_path";
+    std::filesystem::create_directories(vis_dir_, ec);
+    if (ec) {
+      RCLCPP_WARN(get_logger(), "Could not create vis dir %s: %s",
+        vis_dir_.c_str(), ec.message().c_str());
     }
 
     RCLCPP_INFO(get_logger(),
@@ -176,7 +190,13 @@ private:
 
       publishTrajectory(*path, planner.path_hops());
       publishStartPosition(*map);
-      writeCsvs(*map, *path, planner.path_hops());
+      const auto stamp = makeStamp();
+      writeCsvs(*map, *path, planner.path_hops(), stamp);
+      const auto snapshot = writeVisSnapshot(
+        *map, *path, planner.path_hops(), planner.v_g_initial(), gx, gy, stamp);
+      if (render_png_ && !snapshot.empty()) {
+        renderSnapshot(snapshot);
+      }
     } catch (const std::exception & e) {
       RCLCPP_ERROR(get_logger(), "Error in goalCallback: %s", e.what());
     }
@@ -296,19 +316,194 @@ private:
     start_pub_->publish(ps);
   }
 
-  void writeCsvs(
-    const ballistic::Map2D5 & map,
-    const std::vector<std::pair<double, double>> & path,
-    const std::vector<ballistic::Hop> & hops)
+  static std::string makeStamp()
   {
     const auto t = std::time(nullptr);
     std::tm tm{};
     localtime_r(&t, &tm);
     std::ostringstream stamp;
     stamp << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S");
+    return stamp.str();
+  }
 
+  // JSON number; non-finite (inflated OBSTACLE = +inf) -> null.
+  static void jsonNum(std::ostream & os, double v)
+  {
+    if (std::isfinite(v)) {
+      os << v;
+    } else {
+      os << "null";
+    }
+  }
+
+  template<typename T>
+  static void jsonArray(std::ostream & os, const char * key, const std::vector<T> & v)
+  {
+    os << "\"" << key << "\": [";
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (i) {os << ",";}
+      jsonNum(os, static_cast<double>(v[i]));
+    }
+    os << "],\n";
+  }
+
+  // Everything visualize_planned_path.py needs to redraw the plan, including
+  // the planner's own map layers (same calls as HoppingAStarPlanner's ctor).
+  // Returns the file path, or "" on failure.
+  std::string writeVisSnapshot(
+    const ballistic::Map2D5 & map,
+    const std::vector<std::pair<double, double>> & path,
+    const std::vector<ballistic::Hop> & hops,
+    double v_g_initial, double gx, double gy,
+    const std::string & stamp)
+  {
+    const std::string file = vis_dir_ + "/snapshot_" + stamp + ".json";
+    std::ofstream f(file);
+    if (!f) {
+      RCLCPP_ERROR(get_logger(), "Failed to open snapshot %s", file.c_str());
+      return "";
+    }
+
+    std::vector<double> grid(static_cast<size_t>(map.rows()) * map.cols());
+    for (int r = 0; r < map.rows(); ++r) {
+      for (int c = 0; c < map.cols(); ++c) {
+        grid[static_cast<size_t>(r) * map.cols() + c] = map.at(r, c);
+      }
+    }
+    const auto steep = map.steep_mask(p_.steep_grade, false);
+    const auto standable = map.standable_mask(
+      p_.robot_radius, p_.min_clearance_gate, p_.steep_grade);
+    const auto inflated = map.inflated_field(
+      p_.robot_radius + p_.min_clearance_gate, p_.steep_grade);
+
+    // hop_radii[i] is the ring available when departing path[i]: the first
+    // from the seeded start speed, later ones from each hop's recorded radius.
+    std::vector<double> hop_radii{ballistic::max_hop_radius(
+        v_g_initial, p_.eta, p_.e_inject_max, p_.mass, p_.g, p_.V_max)};
+    for (const auto & h : hops) {
+      hop_radii.push_back(h.hop_radius);
+    }
+    std::vector<double> apex;
+    for (size_t i = 0; i < path.size(); ++i) {
+      apex.push_back(waypointApex(i, hops));
+    }
+
+    f << std::setprecision(9) << "{\n"
+      << "\"stamp\": \"" << stamp << "\",\n"
+      << "\"origin_x\": " << map.origin_x() << ",\n"
+      << "\"origin_y\": " << map.origin_y() << ",\n"
+      << "\"resolution\": " << map.resolution() << ",\n"
+      << "\"rows\": " << map.rows() << ",\n"
+      << "\"cols\": " << map.cols() << ",\n"
+      << "\"robot_radius\": " << p_.robot_radius << ",\n"
+      << "\"min_clearance\": " << p_.min_clearance_gate << ",\n"
+      << "\"steep_grade\": " << p_.steep_grade << ",\n"
+      << "\"start\": [" << robot_x_ << "," << robot_y_ << "],\n"
+      << "\"goal\": [" << gx << "," << gy << "],\n";
+    f << "\"path\": [";
+    for (size_t i = 0; i < path.size(); ++i) {
+      if (i) {f << ",";}
+      f << "[" << path[i].first << "," << path[i].second << "]";
+    }
+    f << "],\n";
+    jsonArray(f, "target_apex", apex);
+    jsonArray(f, "hop_radii", hop_radii);
+    jsonArray(f, "grid", grid);
+    jsonArray(f, "steep", steep);
+    jsonArray(f, "standable", standable);
+    jsonArray(f, "inflated", inflated);
+    f << "\"leg_length\": " << p_.leg_length << ",\n"
+      << "\"arc_max_step\": " << p_.arc_max_step << ",\n";
+    writeHopSideViews(f, map, path, hops, inflated);
+    f << "\"format\": 2\n}\n";
+    return file;
+  }
+
+  // Per-hop side-view data. Samples come from the planner's own arc_samples
+  // (same centreline, spacing and active mask clearance_floor_alpha inverts),
+  // and min_clearance is Python's arc_clearance: min over active samples of
+  // foot(u) - inflated(u), the number compared against min_clearance_gate.
+  void writeHopSideViews(
+    std::ostream & f,
+    const ballistic::Map2D5 & map,
+    const std::vector<std::pair<double, double>> & path,
+    const std::vector<ballistic::Hop> & hops,
+    const std::vector<double> & inflated)
+  {
+    f << "\"hops\": [\n";
+    for (size_t i = 0; i < hops.size() && i + 1 < path.size(); ++i) {
+      const auto & h = hops[i];
+      const auto [x_s, y_s] = path[i];
+      const auto [x_g, y_g] = path[i + 1];
+      const auto [rs, cs] = map.world_to_grid(x_s, y_s);
+      const auto [rg, cg] = map.world_to_grid(x_g, y_g);
+      const double t_s = map.at(rs, cs);
+      const double t_g = map.at(rg, cg);
+
+      const auto sampled = ballistic::arc_samples(
+        x_s, y_s, t_s, x_g, y_g, t_g, map, inflated, p_.arc_max_step);
+      std::vector<double> u, field, ground;
+      std::vector<uint8_t> active;
+      double min_c = std::numeric_limits<double>::infinity();
+      if (sampled) {
+        u = sampled->u;
+        field = sampled->field;
+        active = sampled->active;
+        const double X = sampled->X;
+        const double tan_a = std::tan(h.alpha_s);
+        const double k = (X * tan_a - (t_g - t_s)) / (X * X);
+        for (size_t j = 0; j < u.size(); ++j) {
+          const double cx = x_s + u[j] * (x_g - x_s) / X;
+          const double cy = y_s + u[j] * (y_g - y_s) / X;
+          const auto [r, c] = map.world_to_grid(cx, cy);
+          ground.push_back(map.at(r, c));
+          if (active[j]) {
+            const double foot = t_s + u[j] * tan_a - k * u[j] * u[j];
+            min_c = std::min(min_c, foot - field[j]);
+          }
+        }
+      }
+
+      f << (i ? ",\n" : "") << "{";
+      jsonArray(f, "u", u);
+      jsonArray(f, "field", field);
+      jsonArray(f, "ground", ground);
+      jsonArray(f, "active", active);
+      f << "\"min_clearance\": ";
+      jsonNum(f, min_c);
+      f << ", \"t_s\": " << t_s << ", \"t_g\": " << t_g
+        << ", \"alpha_s\": " << h.alpha_s << ", \"X\": " << h.X << ", \"Z\": " << h.Z
+        << ", \"apex_drop\": " << h.apex_drop
+        << ", \"target_apex\": " << h.apex_drop + h.Z << "}";
+    }
+    f << "\n],\n";
+  }
+
+  // Fire-and-forget: the trailing '&' keeps matplotlib off the planning thread.
+  void renderSnapshot(const std::string & snapshot)
+  {
+    std::string script;
+    try {
+      script = ament_index_cpp::get_package_prefix("ballistic_motion_planner") +
+        "/lib/ballistic_motion_planner/visualize_planned_path.py";
+    } catch (const std::exception & e) {
+      RCLCPP_WARN(get_logger(), "Cannot locate visualize_planned_path.py: %s", e.what());
+      return;
+    }
+    const std::string cmd = "python3 '" + script + "' '" + snapshot + "' &";
+    if (std::system(cmd.c_str()) != 0) {
+      RCLCPP_WARN(get_logger(), "Failed to launch path renderer: %s", cmd.c_str());
+    }
+  }
+
+  void writeCsvs(
+    const ballistic::Map2D5 & map,
+    const std::vector<std::pair<double, double>> & path,
+    const std::vector<ballistic::Hop> & hops,
+    const std::string & stamp)
+  {
     {
-      std::ofstream f(csv_dir_ + "/ballistic_path_" + stamp.str() + ".csv");
+      std::ofstream f(csv_dir_ + "/ballistic_path_" + stamp + ".csv");
       if (f) {
         f << "x,y,z\n" << std::fixed << std::setprecision(6);
         for (size_t i = 0; i < path.size(); ++i) {
@@ -319,7 +514,7 @@ private:
       }
     }
     {
-      std::ofstream f(csv_dir_ + "/ballistic_hops_" + stamp.str() + ".csv");
+      std::ofstream f(csv_dir_ + "/ballistic_hops_" + stamp + ".csv");
       if (f) {
         f << "hop,X,Z,alpha_deg,v_s,v_g,v_g_in,e_inject,apex_drop,target_apex,hop_radius\n"
           << std::fixed << std::setprecision(6);
@@ -338,7 +533,7 @@ private:
     // two diff column-for-column. hops[i] is the edge path[i]->path[i+1], so
     // its landing waypoint is path[i+1]. Energies use the planner's own mass/g.
     {
-      std::ofstream f(planning_csv_dir_ + "/planned_hops_" + stamp.str() + ".csv");
+      std::ofstream f(planning_csv_dir_ + "/planned_hops_" + stamp + ".csv");
       if (f) {
         f << "timestamp,hop_number,land_x,land_y,land_z,roll_deg,pitch_deg,yaw_deg,"
              "previous_apex_h,target_apex,potential_energy_J,landing_velocity_mps,landing_ke_J,"
@@ -368,8 +563,10 @@ private:
 
   ballistic::PlannerParams p_;
   double hover_offset_;
+  bool render_png_;
   std::string csv_dir_;
   std::string planning_csv_dir_;
+  std::string vis_dir_;
 
   grid_map_msgs::msg::GridMap::SharedPtr latest_map_msg_;
   double robot_x_ = 0.0, robot_y_ = 0.0;

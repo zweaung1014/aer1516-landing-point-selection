@@ -5,7 +5,8 @@
 //              /goal_pose      (geometry_msgs/PoseStamped, one-shot trigger)
 // Publishes:   /ballistic_trajectory       (visualization_msgs/Marker,
 //                DELETE then ADD SPHERE_LIST, id=400 — the hopcopter contract;
-//                point z = terrain elevation + output.hover_offset)
+//                point z = target apex of the hop landing there, i.e. apex height
+//                above that hop's takeoff ground; output.hover_offset for the start)
 //              /trajectory_start_position  (geometry_msgs/PoseStamped)
 // Plans exactly once per /goal_pose message; there is no replan timer.
 // CSVs (path + per-hop energy chain) go to data/data_ballistic_planner/.
@@ -63,9 +64,10 @@ public:
     p_.min_hop_radius = declare_parameter("search.min_hop_radius", 0.0);
     p_.robot_radius = declare_parameter("robot.radius", 0.03);
     p_.leg_length = declare_parameter("robot.leg_length", 0.4);
-    p_.min_clearance_gate = declare_parameter("robot.min_clearance", 0.2);
+    p_.min_clearance_gate = declare_parameter("robot.min_clearance", 0.5);
     p_.steep_grade = declare_parameter("clearance.steep_grade", std::tan(60.0 * M_PI / 180.0));
     p_.arc_max_step = declare_parameter("clearance.arc_max_step", 0.05);
+    // Target apex for the start point, which no planned hop lands on.
     hover_offset_ = declare_parameter("output.hover_offset", 0.8);
     const auto map_topic = declare_parameter("topics.map", std::string("/elevation_map"));
     const auto traj_topic = declare_parameter("topics.trajectory", std::string("/ballistic_trajectory"));
@@ -172,7 +174,7 @@ private:
         planner.n_edge_checks(), planner.n_edges_accepted());
       logHopTable(planner);
 
-      publishTrajectory(*map, *path);
+      publishTrajectory(*path, planner.path_hops());
       publishStartPosition(*map);
       writeCsvs(*map, *path, planner.path_hops());
     } catch (const std::exception & e) {
@@ -226,9 +228,20 @@ private:
     RCLCPP_INFO(get_logger(), "%s", oss.str().c_str());
   }
 
+  // Apex height above takeoff ground of the hop that lands on path[i].
+  // hops[i] is the edge path[i]->path[i+1]; path[0] has no incoming hop.
+  double waypointApex(size_t i, const std::vector<ballistic::Hop> & hops) const
+  {
+    if (i == 0 || i > hops.size()) {
+      return hover_offset_;
+    }
+    const auto & h = hops[i - 1];
+    return h.apex_drop + h.Z;
+  }
+
   void publishTrajectory(
-    const ballistic::Map2D5 & map,
-    const std::vector<std::pair<double, double>> & path)
+    const std::vector<std::pair<double, double>> & path,
+    const std::vector<ballistic::Hop> & hops)
   {
     if (path.size() < 2) {
       RCLCPP_WARN(get_logger(),
@@ -257,14 +270,12 @@ private:
     m.scale.x = m.scale.y = m.scale.z = 0.1;
     m.color.b = 1.0;  // blue, to distinguish from RRT*'s red
     m.color.a = 1.0;
-    for (const auto & [x, y] : path) {
-      const auto [r, c] = map.world_to_grid(x, y);
+    for (size_t i = 0; i < path.size(); ++i) {
       geometry_msgs::msg::Point pt;
-      pt.x = x;
-      pt.y = y;
-      // Control target: terrain elevation + hover offset. On flat ground this
-      // is exactly today's hardcoded 0.8, preserving hopcopter's behavior.
-      pt.z = map.at(r, c) + hover_offset_;
+      pt.x = path[i].first;
+      pt.y = path[i].second;
+      // Control target: hopcopter uses z as its desired hop height.
+      pt.z = waypointApex(i, hops);
       m.points.push_back(pt);
     }
     traj_pub_->publish(m);
@@ -300,9 +311,8 @@ private:
       std::ofstream f(csv_dir_ + "/ballistic_path_" + stamp.str() + ".csv");
       if (f) {
         f << "x,y,z\n" << std::fixed << std::setprecision(6);
-        for (const auto & [x, y] : path) {
-          const auto [r, c] = map.world_to_grid(x, y);
-          f << x << "," << y << "," << map.at(r, c) + hover_offset_ << "\n";
+        for (size_t i = 0; i < path.size(); ++i) {
+          f << path[i].first << "," << path[i].second << "," << waypointApex(i, hops) << "\n";
         }
       } else {
         RCLCPP_ERROR(get_logger(), "Failed to open path CSV in %s", csv_dir_.c_str());
@@ -311,14 +321,14 @@ private:
     {
       std::ofstream f(csv_dir_ + "/ballistic_hops_" + stamp.str() + ".csv");
       if (f) {
-        f << "hop,X,Z,alpha_deg,v_s,v_g,v_g_in,e_inject,apex_drop,hop_radius\n"
+        f << "hop,X,Z,alpha_deg,v_s,v_g,v_g_in,e_inject,apex_drop,target_apex,hop_radius\n"
           << std::fixed << std::setprecision(6);
         for (size_t i = 0; i < hops.size(); ++i) {
           const auto & h = hops[i];
           f << i + 1 << "," << h.X << "," << h.Z << ","
             << h.alpha_s * 180.0 / M_PI << "," << h.v_s << "," << h.v_g << ","
             << h.v_g_in << "," << h.e_inject << "," << h.apex_drop << ","
-            << h.hop_radius << "\n";
+            << h.apex_drop + h.Z << "," << h.hop_radius << "\n";
         }
       } else {
         RCLCPP_ERROR(get_logger(), "Failed to open hops CSV in %s", csv_dir_.c_str());
@@ -331,7 +341,7 @@ private:
       std::ofstream f(planning_csv_dir_ + "/planned_hops_" + stamp.str() + ".csv");
       if (f) {
         f << "timestamp,hop_number,land_x,land_y,land_z,roll_deg,pitch_deg,yaw_deg,"
-             "previous_apex_h,potential_energy_J,landing_velocity_mps,landing_ke_J,"
+             "previous_apex_h,target_apex,potential_energy_J,landing_velocity_mps,landing_ke_J,"
              "takeoff_velocity_mps,takeoff_ke_J,energy_injection_J\n"
           << std::fixed << std::setprecision(6);
         const double ts = now().seconds();
@@ -345,7 +355,8 @@ private:
           const double takeoff_ke = 0.5 * p_.mass * h.v_s * h.v_s;
           f << ts << "," << i + 1 << "," << lx << "," << ly << "," << land_z
             << ",,,,"  // roll_deg,pitch_deg,yaw_deg blank (not modeled in planning)
-            << h.apex_drop << "," << pe << "," << h.v_g << "," << landing_ke << ","
+            << h.apex_drop << "," << h.apex_drop + h.Z << ","
+            << pe << "," << h.v_g << "," << landing_ke << ","
             << h.v_s << "," << takeoff_ke << "," << h.e_inject << "\n";
         }
       } else {

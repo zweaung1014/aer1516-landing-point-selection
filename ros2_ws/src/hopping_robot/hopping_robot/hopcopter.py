@@ -122,6 +122,8 @@ class hopcopter(Node):
         self._climb_energy_injection = 0.0  # propeller work injected in the climb after a touchdown
         self._climb_peak_speed = 0.0        # peak 3D speed during that climb (takeoff velocity)
         self._pending_hop_row = None        # row opened at touchdown, finalized at next apex
+        self._apex_target_set = None        # target apex passed to JHC at the latest apex
+        self._arc_target_apex = None        # target apex that sized the arc now in flight
 
         # Warm-up: hop level in place for this many touchdowns after Play (counted by
         # hop_number) before steering toward the goal, so the first steered hop falls
@@ -166,14 +168,15 @@ class hopcopter(Node):
         # Initialize desired positions as None until trajectory is received
         self.desired_x = None
         self.desired_y = None
-        # desired_rel_z is the constant hop height above the current ground;
-        # desired_z is that height plus the ground elevation under the robot.
+        # desired_z is the hop apex height above the takeoff ground, taken from
+        # the planner's waypoint z (target_apex); desired_rel_z is the default
+        # used before a path arrives, during warm-up, and after the last waypoint.
         self.desired_rel_z = 0.8
-        self.desired_z = 0.8
+        self.desired_z = self.desired_rel_z
         self.desired_yaw = 0.0
 
-        # Ground elevation under the robot, read from /elevation_map at its XY;
-        # 0.0 until a map arrives (flat-ground fallback keeps desired_z at 0.8).
+        # Ground elevation lookup from /elevation_map (_ground_elevation_at).
+        # Currently unused: hop height comes from the planner's target_apex.
         self.current_ground_z = 0.0
         self._emap_data = None       # flat float array of the "elevation" layer
         self._emap_res = 0.0
@@ -245,7 +248,7 @@ class hopcopter(Node):
         self.JSTO = JumpingStateTrackerOnboard(acc_z_up_limit=2.0, z_dot_limit=0.2 ,controller_engage_time_auto=True,
                             controller_engage_time=0.16, powered_climbing_end_timer=0.2, powered_failing_begin_timer=0.15) # was powered_climbing_end_timer=0.12
         self.LSE = LandingStateEstimator()
-        self.JHC = JumpingHeightController(leg_efficiency=0.7, g=9.6, t_p_low=0.04, t_p_high=0.7, t_i = 0.06, thrust_gain=0.7) # was thrust_gain=0.55
+        self.JHC = JumpingHeightController(leg_efficiency=0.7, g=9.6, t_p_low=0.04, t_p_high=1.5, t_i = 0.06, thrust_gain=0.7) # was thrust_gain=0.55
         self.IPJM = InPlaneJumpingModel(1.688, 2.469)
         self.LJC = LinearJumpingController(high_ballistic_enable = True, model=self.IPJM, g = self.G, normal_gain=1)
         self.TJ = trajectory(reverse_R=1.1)
@@ -290,7 +293,7 @@ class hopcopter(Node):
             'timestamp', 'hop_number',
             'land_x', 'land_y', 'land_z',
             'roll_deg', 'pitch_deg', 'yaw_deg',
-            'previous_apex_h', 'potential_energy_J',
+            'previous_apex_h', 'target_apex', 'potential_energy_J',
             'landing_velocity_mps', 'landing_ke_J',
             'takeoff_velocity_mps', 'takeoff_ke_J',
             'energy_injection_J',
@@ -545,21 +548,25 @@ class hopcopter(Node):
         """Load the next waypoint from the list as the current goal (pops index 0)"""
         if len(self.waypoint_list) > 0:
             waypoint = self.waypoint_list.pop(0)  # Remove and return first element
-            # Goals are XY-only; the waypoint's z is ignored (desired_z tracks
-            # the ground under the robot, computed each control tick).
+            # The waypoint's z is the planner's target apex (height above the
+            # takeoff ground) for the hop that lands on this waypoint.
             wx, wy, wz = waypoint
             self.desired_x = wx
             self.desired_y = wy
+            self.desired_z = wz
             self.desired_yaw = 0.0  # Keep yaw at 0 as requested
             self.has_active_goal = True
             # Store this as the last waypoint position (XY only)
             self.last_waypoint_position = (self.desired_x, self.desired_y)
-            self.get_logger().info(f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}")
+            self.get_logger().info(
+                f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}, "
+                f"target_apex={self.desired_z:.3f}")
         else:
             # No more waypoints - hold the last position if we had one
             if self.last_waypoint_position is not None:
                 self.desired_x, self.desired_y = self.last_waypoint_position
                 self.desired_yaw = 0.0
+                self.desired_z = self.desired_rel_z  # hop in place at the default height
                 self.get_logger().info(f"All waypoints completed - holding last position: x={self.desired_x:.3f}, y={self.desired_y:.3f}")
             self.has_active_goal = False
             self.get_logger().info("All waypoints completed")
@@ -637,11 +644,6 @@ class hopcopter(Node):
             if self.last_waypoint_position is not None:
                 self.desired_x, self.desired_y = self.last_waypoint_position
                 self.desired_yaw = 0.0
-
-        # Altitude target = constant hop height above the ground the robot is
-        # currently standing on (2.5D elevation map lookup at its XY).
-        self.current_ground_z = self._ground_elevation_at(self.pos_x, self.pos_y)
-        self.desired_z = self.current_ground_z + self.desired_rel_z
 
         self.desired_x_dot, self.desired_y_dot, self.desired_z_dot = 0, 0, 0
 
@@ -780,9 +782,13 @@ class hopcopter(Node):
                     f'{time.time():.6f}', self.hop_number,
                     f'{foot_x:.6f}', f'{foot_y:.6f}', f'{foot_z:.6f}',
                     f'{euler[2]:.4f}', f'{-euler[1]:.4f}', f'{euler[0]:.4f}',
-                    f'{previous_apex_h:.6f}', f'{pe:.6f}',
+                    f'{previous_apex_h:.6f}',
+                    '' if self._arc_target_apex is None else f'{self._arc_target_apex:.6f}',
+                    f'{pe:.6f}',
                     f'{landing_v:.6f}', f'{landing_ke:.6f}',
                 ]
+                # The arc about to take off was sized at the latest apex
+                self._arc_target_apex = self._apex_target_set
                 # Reset accumulators for the arc that starts at this touchdown
                 self._arc_max_z = self.pos_z
                 self._climb_energy_injection = 0.0
@@ -801,7 +807,11 @@ class hopcopter(Node):
                     landing_speed_z = - self.G_flight_time_mocap * falling_time
 
                     self.JHC.update_apex_state(Abs_time, self.Diff_X.data_rate, self.Diff_Y.data_rate)
-                    self.JSTO.powered_climbing_end_timer = self.JHC.step(self.desired_rel_z)
+                    # Size the next powered climb for the current waypoint's target
+                    # apex (warm-up hops stay in place at the default height)
+                    jhc_target = self.desired_z if self.steering_enabled else self.desired_rel_z
+                    self.JSTO.powered_climbing_end_timer = self.JHC.step(jhc_target)
+                    self._apex_target_set = jhc_target
 
                     self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
                                        self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)

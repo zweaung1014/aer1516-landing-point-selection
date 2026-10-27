@@ -134,12 +134,13 @@
 
 
 
-    <!-- Low wall matching maps/low_wall.py: Python x in [1.7, 1.9] -> world
-         x in [1.2, 1.4] (map origin offset -0.5, -2.5), height 0.4 m,
-         spanning the full 5 m map width in y. -->
+    <!-- Low wall at world x in [2.5, 2.7], height 0.4 m, spanning the full
+         5 m map width in y. Must match elevation_map_publisher's wall.x_min /
+         wall.x_max. Shifted +1.3 m from maps/low_wall.py (which would put it
+         at world x in [1.2, 1.4]). -->
     <model name="low_wall">
       <static>true</static>
-      <pose>1.3 0 0.2 0 0 0</pose>
+      <pose>2.6 0 0.2 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>0.2 5.0 0.4</size></box></geometry>

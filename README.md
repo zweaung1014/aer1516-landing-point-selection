@@ -97,8 +97,9 @@ bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.s
 ```
 
 The `crazysim_low_wall` world is the default world without the chair/prius,
-plus a 0.4 m wall at world x ∈ [1.2, 1.4] matching the published elevation map
-(`maps/low_wall.py` shifted by the map origin (−0.5, −2.5)).
+plus a 0.4 m wall at world x ∈ [2.5, 2.7] matching the published elevation map
+(`wall.x_min` / `wall.x_max`). This is 1.3 m farther out than the Python reference
+`maps/low_wall.py`, which would put it at world x ∈ [1.2, 1.4].
 
 ### Terminal 2 — Launch cflib Server
 

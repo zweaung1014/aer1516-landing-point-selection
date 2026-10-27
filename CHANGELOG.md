@@ -2,7 +2,38 @@
 
 ## [Unreleased]
 
+### Added
+- **Planner-commanded hop height (`target_apex`)**: the `/ballistic_trajectory` marker's point z
+  is now each waypoint's `target_apex` = `apex_drop + Z` of the hop that lands on it (planned
+  apex height above that hop's takeoff ground), and `output.hover_offset` (0.8 m) for the start
+  point. It replaces `terrain + 0.8`, which hopcopter ignored. `hopcopter` sets `desired_z` from
+  it in `_load_next_waypoint` and passes it to `JHC.step()` at each apex, so the powered-climb
+  duration now follows the plan instead of the constant `desired_rel_z`. The 0.8 m
+  `desired_rel_z` remains the fallback before a path arrives, during warm-up hops, and after the
+  last waypoint. The per-tick `desired_z = ground + 0.8` lookup was removed; it only fed the
+  unused flight-mode PID. The planner search is unchanged, so flat hops can command 0.70 m
+  (`min_apex`).
+- **`target_apex` CSV column**: added after `previous_apex_h` in `planned_hops_*.csv` and in
+  hopcopter's `hop_tracking/hopcopter_*.csv` (there it is the target that sized that arc's
+  push; blank for startup arcs), and after `apex_drop` in `ballistic_hops_*.csv`.
+  `ballistic_path_*.csv` z now matches the published marker z.
+
 ### Changed
+- **`low_wall` moved +1.3 m in x**: the wall now sits at world x ∈ [2.5, 2.7] (was [1.2, 1.4]),
+  giving the robot more room before the wall. Changed in both `elevation_map_publisher`
+  (`wall.x_min` / `wall.x_max` defaults) and the Gazebo world `crazysim_low_wall.sdf` (pose x
+  1.3 → 2.6). Height, thickness and y span are unchanged. The wall no longer matches the Python
+  reference `maps/low_wall.py`; `parity_main.cpp` still uses the reference geometry.
+- **`ballistic_motion_planner` min clearance**: raised `robot.min_clearance`
+  (`min_clearance_gate`) from 0.2 m to 0.5 m in both the ROS parameter default and the
+  `PlannerParams` struct default. It is both the vertical gap the foot's arc must keep above
+  terrain and part of the horizontal inflation (`robot_radius + gate` = 0.53 m) used for obstacle
+  widening and the standability mask. `parity_main.cpp` keeps 0.05 m to stay in lock-step with
+  the Python reference. On `low_wall` (start (0,0) → goal (3.5,0)) the wall-crossing hop grows
+  from X 2.1 m / apex 0.88 m / 3.0 J to X 2.5 m / apex 1.28 m / 6.1 J.
+- **`hopcopter` JHC max powered-climb time**: `t_p_high` raised from 0.7 s to 1.5 s to leave
+  room for longer pushes toward taller `target_apex` values. Thrust is applied only while
+  `jumping_state == 3`, so the push still ends at the detected apex.
 - **`ballistic_motion_planner` min apex height**: raised `physics.min_apex` from 0.3 m to
   0.7 m, so every planned hop's arc must peak at least 0.7 m above the higher of its two
   endpoints. Updated in both the ROS parameter default (`ballistic_planner_node.cpp`) and the

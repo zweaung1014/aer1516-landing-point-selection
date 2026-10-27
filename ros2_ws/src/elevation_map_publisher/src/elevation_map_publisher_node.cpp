@@ -39,8 +39,8 @@ public:
     scenario_ = this->declare_parameter("scenario", std::string("low_wall"));
     // Wall geometry in WORLD coordinates (y unbounded: full map width).
     wall_height_ = this->declare_parameter("wall.height", 0.4);
-    wall_x_min_ = this->declare_parameter("wall.x_min", 1.2);
-    wall_x_max_ = this->declare_parameter("wall.x_max", 1.4);
+    wall_x_min_ = this->declare_parameter("wall.x_min", 2.5);
+    wall_x_max_ = this->declare_parameter("wall.x_max", 2.7);
     publish_rate_ = this->declare_parameter("publish_rate", 1.0);
 
     buildMap();

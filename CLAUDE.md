@@ -96,16 +96,23 @@ pose, and `/goal_pose`. On each goal it runs a hopping-aware **A\*** search over
 map (each move a physically feasible parabolic hop) and publishes the path **once** — there is
 no replan timer. The path travels as a `Marker` SPHERE_LIST (id=400) on `/ballistic_trajectory`
 (**waypoints travel as marker points, not a `nav_msgs/Path`**), with the robot's position at
-planning time on `/trajectory_start_position`. Per-waypoint z is `terrain elevation + hover
-offset` (0.8 m). The node works entirely in the world frame and does not use TF or the LiDAR.
+planning time on `/trajectory_start_position`. Per-waypoint z is the **`target_apex`** of the
+hop that lands on that waypoint — the planned apex height above that hop's takeoff ground
+(`apex_drop + Z`) — and `output.hover_offset` (0.8 m) for the start point, which no hop lands
+on. It is a relative height, not a world z. The node works entirely in the world frame and does
+not use TF or the LiDAR.
 
 **2. `hopcopter`** (`hopping_robot/hopping_robot/hopcopter.py`) owns the waypoint queue. It
 consumes the marker (id=400), holds `self.waypoint_list`, and pops the next target once the
 current one is inside `current_goal_tolerance`, holding the last position when the list
-empties. Goals are **XY-only**: `_load_next_waypoint` ignores the waypoint z, and each control
-tick `desired_z` is set to `desired_rel_z` (0.8 m) **above the ground elevation sampled from
-`/elevation_map` under the robot's XY** — this is how the hop height tracks 2.5D terrain.
-Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnboard`
+empties. `_load_next_waypoint` sets `desired_x/y` from the waypoint and `desired_z` from its z
+(the planner's `target_apex`); `desired_z` falls back to `desired_rel_z` (0.8 m) before a path
+arrives and after the last waypoint. At each apex (3 → 1) `JumpingHeightController.step()` turns
+`desired_z` into the next powered-climb duration (fixed thrust, duration clamped to
+`t_p_low..t_p_high`) — this is how hop height follows the plan. Warm-up hops use
+`desired_rel_z`. Height control is approximate: JHC estimates the last hop's energy from fall
+time, reacts one hop late, and the takeoff angle is still chosen by `LinearJumpingController`,
+not the planner. Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnboard`
 (`JumpLib/jumping_tools.py`), whose `jumping_state` is the clock for the whole system:
 
 - **1 — falling/ballistic:** unpowered, attitude tracked from the planned arc (`LinearJumpingController`).
@@ -119,9 +126,9 @@ arrives.
 
 **3. `elevation_map_publisher_node`** (`elevation_map_publisher/`) publishes the **known** 2.5D
 map on `/elevation_map` (`grid_map_msgs/GridMap`, transient_local so late subscribers still get
-it). The scenario is selectable by parameter (`low_wall` or `flat`). Both `ballistic_planner_node`
-and `hopcopter` depend on it; nothing plans or tracks terrain height without it. LiDAR-based map
-building is future work.
+it). The scenario is selectable by parameter (`low_wall` or `flat`). `ballistic_planner_node`
+cannot plan without it. `hopcopter` still subscribes and caches it (`_ground_elevation_at`), but
+that lookup no longer drives hop height. LiDAR-based map building is future work.
 
 **4. `nlp_goal_node`** (`nlp_goal_interface/`) is a terminal REPL that calls the Anthropic
 API with two tools (`extract_coordinates`, `approach_object`) and publishes the result on

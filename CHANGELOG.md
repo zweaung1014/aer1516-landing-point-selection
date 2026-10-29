@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Stage 2 reports in `calibrate_hops.py`**: the lead each push cutoff implies (and the
+  `t_lead` it calls for), apex error per target, 3 → 2 transitions during a push, injection
+  available within the 0.4 s cap against liftoff vertical speed (fitted to every push), and the
+  horizontal speed a push adds after a tilted liftoff.
+- **`test_push_controller.py`** (16 tests): arming, the cutoff, the cap, and a closed-loop climb
+  with the Gazebo motor model, whose apex lands within ±1.2 cm of target with the lead and
+  4–8 cm high without it.
 - **Stage 0 instrumentation (`docs/follow_planner_plan.md`)**: the per-tick
   `position_attitude_tracking/attitude_*.csv` gains, after its existing columns: the odom stamp
   (sim time) and pose, the velocity differentiated from consecutive odom poses on their stamps
@@ -38,6 +45,53 @@
   `ballistic_path_*.csv` z now matches the published marker z.
 
 ### Changed
+- **The push is cut off at the target apex, closed-loop** (stage 2 of
+  `docs/follow_planner_plan.md`; this and the next five entries). JHC guessed a push duration at
+  the apex from a one-hop-old energy estimate. It compared a vertical target with a total-energy
+  estimate, assumed 0.7 g of thrust where the real value was 0.48 g, and its first estimate hit
+  an epoch bug. `PushController` (`JumpLib/push_controller.py`) instead cuts the push on the
+  tick where
+  `(z − z_lo) + v²/(2g′) + v·(a_T·cos tilt/g′)·t_lead ≥ H`:
+  - z_lo is the liftoff CoM height, `leg_length` 0.366;
+  - v is the vertical speed from the differentiated odom pose, which is world frame;
+  - g′ is 9.55;
+  - t_lead is 0.026 s: the 21 ms of thrust that keeps arriving after the cut (spin-down,
+    latency, odom age), measured over 74 pushes, plus half a 10 ms tick.
+
+  In place at 0.6–2.0 m, every apex is within −1.8 to +3.0 cm of target (median −0.1 cm,
+  n = 92). The odom twist is body frame and reads up to 1 m/s low on the first tick after
+  liftoff, so it is not used.
+- **Push thrust 21000 → 30000** (D1): 0.81 g, below hover (34265), so a push still ends by
+  the apex on its own. 21000 (0.48 g) could not reach the planned apexes. Measured within the
+  0.4 s cap: about 3.1 J/kg at a liftoff vertical speed of 1.5 m/s and 7.4 J/kg at 3 m/s.
+- **Push length**: capped at 0.4 s (was `t_p_high` 1.5 s), with no minimum (was `t_p_low`
+  0.04 s, which alone adds ~11 cm of apex at 30000). JSTO's initial `powered_climbing_end_timer`
+  is 0.2 → 0 s; the timer no longer drives the push.
+- **A push is armed once per real stance**: the IMU must read above 5 g for 10 ms, and the
+  robot must climb faster than 1 m/s. The push is never armed in flight (state 1). JSTO re-armed
+  on any acc_z crossing, and spurious 3 → 2 → 3 transitions were logged at 09:44 and 10:30. A
+  stance tick in mid-climb now only pauses the push.
+- **Apex-decision CSV**: `jhc_nominal_h` and `push_time` are replaced by the record of the
+  climb that just ended: `climb_target`, `climb_apex` (both above the liftoff CoM height),
+  `push_end` (`target`, `leg`, `cap`, `apex`, `stance` or `unarmed`), `push_s`, and the state at
+  the tick that ended the push: `cut_h`, `cut_vz`, `cut_cos_tilt`.
+- **SITL IMU fixes (problem 2, the motor cut-out)**. The firmware log showed the supervisor
+  going armed → flying → tumbled + crashed at a stance, which locks the motors for good. Two sim
+  artifacts caused it, and both are fixed:
+  - `sensors_sitl.c` computed an accelerometer scale from the 1000 samples after the gyro bias
+    settles, about 1.1 s after Play. A dropped robot is hopping then, so the scale came out
+    around 0.54. Idle coasts then read 0.104 g, above the tumble check's 0.1 g free-fall limit,
+    so its clock ran through every flight. The scale now stays at 1: Gazebo's accelerometer has
+    no scale error.
+  - `crazysim_plugin.cpp` cast IMU values to int16 without a range check, so 20–30 g stance
+    readings wrapped to negative values: "upside down". Counts now saturate at ±16 g and
+    ±2000 °/s like a real sensor.
+
+  With the supervisor enabled, a run with in-place and steered hops up to 33° of tilt stayed
+  armed and flying throughout. The scale fix also corrects the firmware's own state estimate,
+  which feeds `/cf_1/pose`. `cf2` and the plugin were rebuilt from current source, which also
+  compiles `stabilizer.c`'s 2025-10-15 edit: the supervisor calls are commented out in SITL. The
+  previous `cf2` binary predated that edit.
 - **Waypoints advance at the apex, not by distance** (stage 1 of `docs/follow_planner_plan.md`;
   this and the next six entries). The planner plans exactly one hop per
   waypoint, and LJC/JHC commit to the next landing and push at the apex. The old 0.4 m distance
@@ -107,6 +161,8 @@
   the Python reference. `validate_params` still passes (first-hop tan floor 0.833 < ceiling 1.0).
 
 ### Removed
+- `hopcopter`: `JumpingHeightController` and its calls (`estimate_height`, `update_apex_state`,
+  `step`). The class stays in `JumpLib/jumping_tools.py`, unused.
 - `hopcopter`: the distance pop (`current_goal_tolerance`), `_load_next_waypoint`, the
   `waypoint_list` queue, `apply_follower_gating` and the `/trajectory_start_position`
   subscription. The gating never used the start position; it ran on the first plan in only 2 of

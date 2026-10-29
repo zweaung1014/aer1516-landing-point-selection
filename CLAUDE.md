@@ -67,9 +67,9 @@ until **Play** is pressed in the Gazebo GUI. A goal then goes in either by publi
 
 There is **no test suite for the simulation**. The `test/` directories in the Python packages
 contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
-`test_waypoint_tracker.py`. Run it with
-`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py`.
-It covers waypoint decisions and the braking tilt guard. Everything else is verified by running
+`test_waypoint_tracker.py` and `test_push_controller.py`. Run them with
+`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py`.
+They cover waypoint decisions, the braking tilt guard and the push cutoff. Everything else is verified by running
 the sim and inspecting the CSVs it writes (below).
 
 ### Analysis scripts (run from the repo root, not the workspace)
@@ -86,7 +86,7 @@ convention: **+x is drawn vertically up, +y horizontally left.**
 
 For the live pipeline, `python visualize_rpy.py` plots commanded vs actual attitude and
 `python calibrate_hops.py` reports g′, η per stance, the odom twist frame, push thrust, cutoff
-latency and `/cf_1/pose` error. Both read hopcopter's newest per-tick
+latency, `/cf_1/pose` error, and the push cutoff's lead, apex error and capacity. Both read hopcopter's newest per-tick
 `data/data_ballistic_planner/position_attitude_tracking/attitude_*.csv` and need pandas (the repo
 `.venv`, not `/usr/bin/python3`). Per-apex decisions go to `hop_tracking/apex_decisions_*.csv`.
 
@@ -132,10 +132,15 @@ distance pop and no counter, so a missed apex costs one hop. Hops in place use `
 (0.8 m), a ROS parameter that can change mid-run
 (`ros2 param set /hopcopter desired_rel_z 1.0`).
 
-At each apex `JumpingHeightController.step()` turns the chosen target apex into the next
-powered-climb duration (fixed thrust, duration clamped to `t_p_low..t_p_high`). This is how hop
-height follows the plan. Warm-up hops use `desired_rel_z`. Height control is approximate: JHC
-estimates the last hop's energy from fall time and reacts one hop late. The takeoff angle is
+The chosen target apex is what the next climb's push aims at, which is how hop height follows
+the plan (warm-up hops use `desired_rel_z`). `PushController` (`JumpLib/push_controller.py`,
+unit-tested in `test/test_push_controller.py`) arms one push per real stance (IMU above 5 g for
+10 ms, climbing faster than 1 m/s, never in flight) at PWM 30000 (0.81 g, below hover). It cuts the
+push as soon as the coast will reach the target:
+`(z − z_lo) + v²/(2g′) + v·(a_T/g′)·t_lead ≥ H`, where z_lo is the liftoff CoM height
+(`leg_length`), v the differentiated-pose vertical speed, g′ 9.55, and t_lead 0.026 s (thrust
+still arriving after the cut, plus half a tick). A push is capped at 0.4 s. In place it lands
+within ±3 cm of the target. `JumpingHeightController` is no longer used. The takeoff angle is
 still chosen by `LinearJumpingController`, not the planner. Its `limit_landing_tilt` (braking
 tilt guard) rotates a takeoff that needs more than 20° of landing tilt toward continuing the
 arrival. Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnboard`
@@ -183,6 +188,12 @@ and controller work in the world frame) but is kept for RViz and legacy consumer
   touching it.
 - **`CHANGELOG.md` records why parameters have their values.** Consult it before retuning the
   ballistic planner or the hop controller; several defaults look arbitrary and are not.
+- **The SITL firmware and Gazebo plugin are built binaries.** `cf2` and
+  `libgz_crazysim_plugin.so` live in `crazyflie-firmware/sitl_make/build` (gitignored); after
+  changing firmware or plugin source, run `make -C crazyflie-firmware/sitl_make/build`. In
+  SITL, `stabilizer.c` has the supervisor calls commented out (edited 2025-10-15, first built
+  2026-10-29). The IMU fixes in `sensors_sitl.c` and `crazysim_plugin.cpp` (see `CHANGELOG.md`)
+  keep the supervisor's tumble check from locking the motors if it is ever turned back on.
 - `data/` and `ros2_ws/*.txt` fill with timestamped run logs, and `data/**/*.csv` is
   gitignored. `ros2_ws/src/convert_pc2*.py`, `pc2tocustom`, and `tutorial_interfaces` are
   leftovers from a Livox-format experiment and are not part of the running pipeline.

@@ -1,12 +1,13 @@
 # Plan: make the controller fly the planner's plan
 
-Status: stages 0 and 1 implemented and tested 2026-10-29 (results in each stage); stages 2–4
-proposed.
+Status: stages 0–2 implemented and tested 2026-10-29 (results in each stage), and problem 2
+fixed along the way (stage 2 results); stages 3–4 proposed.
 Written 2026-10-29; decisions D1–D6 made the same day. Follows [diagnosis.md](diagnosis.md).
 
 All four problems in the diagnosis come down to one thing: the controller does not fly what the
 planner plans. This plan fixes problems 1, 3 and 4 in five stages. Problem 2 (the WP1 crash and
-motor cut-out) is deferred. Stages 1, 3 and 4 remove the ~30° landing that triggers it.
+motor cut-out) was deferred, then found and fixed in stage 2: it was a SITL accelerometer
+artifact that tripped the firmware's tumble check (see Deferred).
 
 | Stage | Problem | Code | Change | Verified by |
 |---|---|---|---|---|
@@ -310,6 +311,52 @@ tilt and push length on steered hops. Stage 4 corrects for it.
 - Record the injection per kg available as a function of v_z0 within 0.4 s. It feeds stage 3's
   push-capacity gate.
 
+### Stage 2 results (2026-10-29)
+
+Implemented as `PushController` (`JumpLib/push_controller.py`, 16 unit tests) at PWM 30000.
+`JumpingHeightController` is no longer used.
+- **v̂** is the differentiated odom pose. At the first tick after liftoff it is off by +0.005 m/s
+  (median, worst −0.57). The rotated twist is off by −0.15 there (worst −1.0). From the second
+  tick on, both are right.
+- **The push is armed** at the first climbing tick after a stance of at least 10 ms above 5 g,
+  with v̂ > 1 m/s. A low first tick arms on the next one.
+- **The cut is evaluated from the arming tick on.** v̂ only reads low on the first tick, so that
+  tick can cost at most one extra tick of push (≤ 3 cm).
+
+Problem 2 surfaced first: the first 30000 run lost all motors at its third landing, every time.
+The cause was two SITL artifacts, both fixed (see the problem 2 entry under Deferred).
+
+Headless runs, flat world, on the rebuilt firmware: 16:55 (in-place sweep 0.8 / 0.6 / 1.0 /
+1.2 / 0.8 / 2.0, `t_lead` 0.03) and 17:06 (in place 0.8 / 0.6 / 1.0 / 0.8, then goal (4,0) and
+goal (1.0,1.5), `t_lead` 0.026). Re-run with `python calibrate_hops.py`.
+
+| Check | Result |
+|---|---|
+| Apex within ±5 cm in place, after calibrating the lead | Pass. With `t_lead` 0.026: −1.8 to +3.0 cm, median −0.1 cm (n = 92; targets 0.6, 0.7, 0.8, 1.0). The 0.03 sweep ran −1.1 cm (−3.2 to +0.8, n = 74), the same at every target from 0.6 to 2.0. |
+| Lead | Each cut implies 21 ms (17–31) of thrust after it, so `t_lead` = 21 + 5 = 26 ms. The model predicted 16–19 ms of spin-down plus odom age. |
+| No 3 → 2 during a push | Pass: 0 in both runs; JSTO logged 0 3 → 2 transitions. |
+| Injection within 0.4 s against v_z0 | 3.1 J/kg at 1.5 m/s, 4.5 at 2.0, 6.0 at 2.5, 7.4 at 3.0, 8.9 at 3.5, 10.4 at 4.0 (apex 0.44, 0.68, 0.95, 1.25, 1.57, 1.92 m). This is the push model fitted to 75 pushes: 7.55 m/s² for the push time −1 ms, RMS 0.10 J/kg. The one 0.41 s capped push measured 8.75 J/kg at 3.40 m/s; the fit gives 8.82. |
+| Push at liftoff (2c) | After a 28° liftoff, a 0.31 s push added 0.52 m/s along the motion (two hops). Two near-level liftoffs added ≤ 0.03. Integrating the logged attitude predicts 0.59–0.63. |
+
+For stage 3:
+- The capacity curve is ~15% below the plan's estimate (≥ 3.6 J/kg at 1.5 m/s, ~8.4 at 3 m/s). It
+  is in terms of the liftoff speed that stage 0's η uses, so the planner gets v_z0 the same way.
+  The steady thrust is the motor model's 7.98 (IMU 7.98).
+- g′ per flight is bimodal: 9.26 when the idle motors reach PWM 1000 and 9.81 when they do not.
+  The median is 9.55. This gives ±1.4 cm of apex scatter, within the target.
+
+Seen in the steered runs, for stage 4:
+- **The first steered hop of each path landed ~1 m past WP1.**
+  - LJC still sizes the hop from the current apex and falls back to 45° ("unreachable" from a
+    standing start). The stance then launched at 28° of body tilt.
+  - The push, now running 0.31 s to reach the 0.7 m target, added 0.52 m/s.
+
+  The tracker caught up (one `retry` toward the goal, then `goal`), and both goals were reached.
+  Before stage 2, the weak push had hidden this.
+- **Landings as flown reached 21.7° and 23.4°.** These were commanded at 20.0° (the first just
+  under the guard; the second after the guard cut it from 23.7°): 109–117% of command. This is
+  the D4 question again.
+
 ## Stage 3: plan the real push, account for momentum, publish the takeoff (problem 4, planner)
 
 All behind one planner flag. With the flag off, `ballistic_parity_test` output stays byte-identical
@@ -431,14 +478,21 @@ arrival, and planned landing attitude.
 
 ## Deferred
 
-- **Problem 2.** Stage 0 confirmed the cut-out: after the 29° WP1 brake, all four PWMs read 0
-  during a 21000 push. Two motors were already at 0 during the stance. The unpowered first climb
-  turned out to be a different thing: the motors first turn on 1.15 s of sim time after Play.
-  Every stance exceeds the int16 ±16 g range, so the overflow alone does not explain the cut.
-  Next leads:
-  - the firmware supervisor's tumble check (`supervisor.c` `isTumbledCheck`), fed wrapped
-    accelerations;
-  - the attitude PID saturating on a 29° stance.
+- **Problem 2: fixed 2026-10-29** (found in stage 2). A `supervisor.info` log showed armed →
+  flying → tumbled + crashed at a stance, which locks the motors. The firmware's `acc.z` showed
+  why:
+  - `sensors_sitl.c` computes an accelerometer scale from the 1000 samples after the gyro bias
+    settles, about 1.1–2.1 s after Play. The robot is hopping then, and the scale came out 0.538.
+    Idle coasts then read 0.104 g instead of 0.056, just over `isTumbledCheck`'s 0.1 g free-fall
+    limit, so the tumble clock runs through the whole flight.
+  - The plugin's unchecked int16 cast wraps stance readings above 16 g to negative values: the
+    stance reads −14 g, "upside down", while that clock has already run past 100 ms.
+
+  Whether a run hits this depends on how the start lines up. At 21000 the scale happened to stay
+  above 0.56. The steered WP1 falls, with more thrust, fit the same mechanism. Fixed: the scale
+  stays at 1, and IMU counts saturate. With the supervisor enabled, in-place and steered hops up
+  to 33° stayed armed and flying. In the source, `stabilizer.c` has had the supervisor commented
+  out in SITL since 2025-10-15. The rebuilt `cf2` is the first binary built with that edit.
 - **Replanning.** The planner takes its start from `/cf_1/pose`. A duplicate goal at 09:43 planned
   from (0.05, 0.05) while the robot was at (0.78, 1.64). Mid-run goals, for example from
   nlp_goal_node, need a start from the predicted landing, with the arrival velocity.

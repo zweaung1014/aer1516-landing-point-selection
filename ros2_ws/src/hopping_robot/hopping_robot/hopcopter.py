@@ -36,10 +36,10 @@ from cflib.utils import uri_helper
 # the libraries for hopping
 from hopping_robot.JumpLib.jumping_tools import JumpingStateTrackerOnboard
 from hopping_robot.JumpLib.jumping_model import LandingStateEstimator
-from hopping_robot.JumpLib.jumping_tools import JumpingHeightController
 from hopping_robot.JumpLib.jumping_model import LinearJumpingController
 from hopping_robot.JumpLib.jumping_model import InPlaneJumpingModel
 from hopping_robot.JumpLib.waypoint_tracker import WaypointTracker
+from hopping_robot.JumpLib.push_controller import PushController, push_accel
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
 
@@ -115,7 +115,9 @@ class hopcopter(Node):
         self.leg_length = 0.366
         self.jumping_counter = 0
         self.jumping_height_record = 0.5  # CoM vertical movement distance
-        self.powered_climbing_thrust = 21000 # might need to tune this, was 15000
+        # PWM of the powered climb (D1): 0.81 g, below hover (34265), so a push ends by the apex on
+        # its own. It was 21000 (0.48 g), too weak to reach the planned apexes.
+        self.powered_climbing_thrust = 30000
         self.ready_to_drop = True
 
         # Per-hop energy tracking (configurable)
@@ -128,7 +130,7 @@ class hopcopter(Node):
         self._climb_energy_injection = 0.0  # propeller work injected in the climb after a touchdown
         self._climb_peak_speed = 0.0        # peak 3D speed during that climb (takeoff velocity)
         self._pending_hop_row = None        # row opened at touchdown, finalized at next apex
-        self._apex_target_set = None        # target apex passed to JHC at the latest apex
+        self._apex_target_set = None        # target apex set at the latest apex (the next push aims at it)
         self._arc_target_apex = None        # target apex that sized the arc now in flight
 
         # Warm-up: hop level in place for this many touchdowns after Play (counted by
@@ -254,10 +256,16 @@ class hopcopter(Node):
         self.Diff_Z_vel = Differentiator(diff_steps=20)
 
         # Initialize the important objects for hopping
+        # JSTO's push timer is unused (self.push times the push); 0 so it can never add one
         self.JSTO = JumpingStateTrackerOnboard(acc_z_up_limit=2.0, z_dot_limit=0.2 ,controller_engage_time_auto=True,
-                            controller_engage_time=0.16, powered_climbing_end_timer=0.2, powered_failing_begin_timer=0.15) # was powered_climbing_end_timer=0.12
+                            controller_engage_time=0.16, powered_climbing_end_timer=0.0, powered_failing_begin_timer=0.15) # was powered_climbing_end_timer=0.12
         self.LSE = LandingStateEstimator()
-        self.JHC = JumpingHeightController(leg_efficiency=0.7, g=9.6, t_p_low=0.04, t_p_high=1.5, t_i = 0.06, thrust_gain=0.7) # was thrust_gain=0.55
+        # Powered climb: one push per real stance, cut off as soon as the coast will reach the target
+        # apex (stage 2). Apex heights are above the liftoff CoM height, leg_length over flat ground.
+        # t_lead: thrust still arriving after the cut (21 ms measured), plus half a tick; t_max caps one push.
+        self.push = PushController(push_accel(self.powered_climbing_thrust, self.hop_mass), z_lo=self.leg_length,
+                                   g_coast=self.G_flight_time_mocap, t_lead=0.026, t_max=0.4, v_min=1.0)
+        self._push_on = False
         self.IPJM = InPlaneJumpingModel(1.688, 2.469)
         self.LJC = LinearJumpingController(high_ballistic_enable = True, model=self.IPJM, g = self.G, normal_gain=1)
         self.TJ = trajectory(reverse_R=1.1)
@@ -358,7 +366,9 @@ class hopcopter(Node):
             'takeoff_heading_deg', 'takeoff_elev_deg', 'unreachable',
             'cmd_roll_deg', 'cmd_pitch_deg', 'cmd_tilt_deg', 'planned_tilt_deg', 'tilt_capped',
             'theta_v_deg',
-            'jhc_nominal_h', 'push_time',
+            # the climb that just ended: its target and the apex reached, both above the liftoff
+            # CoM height; how its push ended and lasted; the state at the tick that ended it
+            'climb_target', 'climb_apex', 'push_end', 'push_s', 'cut_h', 'cut_vz', 'cut_cos_tilt',
         ])
         self.get_logger().info(f'Apex-decision CSV: {dec_csv_filename}')
 
@@ -452,6 +462,8 @@ class hopcopter(Node):
 
         # timestamp in seconds (float), sim time
         self.imu_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        # Every 1 kHz sample, so the push controller can tell a real stance from a blip
+        self.push.imu(acc.z, self.imu_stamp)
 
     def elevation_map_callback(self, msg: GridMap) -> None:
         """Cache the 'elevation' layer of the 2.5D map for ground lookups."""
@@ -640,9 +652,10 @@ class hopcopter(Node):
                         'tilt_planned': tilt_planned}
 
     def _log_apex_decision(self, target_apex, fall_h, fall_time, land_vz, landing_attitude_z_b,
-                           steer_log=None):
+                           steer_log, climb, climb_apex):
         """One row per apex: the state the controller acted on and what it commanded.
-        landing_attitude_z_b and steer_log are None on warm-up apexes, which do not steer."""
+        landing_attitude_z_b and steer_log are None on warm-up apexes, which do not steer;
+        climb is None when no push was armed in the climb that just ended."""
         if landing_attitude_z_b is not None:
             d = self._decision
             tv = self.LJC.takeoff_velocity  # unit takeoff direction handed to the stance model
@@ -664,6 +677,11 @@ class hopcopter(Node):
             decision = ['', 'warmup', '', '', '']
             foot = ['', '']
             steer = ['', '', '', f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}', '', '', '', '']
+        if climb is None:
+            push = ['', f'{climb_apex:.4f}', 'unarmed', '', '', '', '']
+        else:
+            push = [f'{climb.target:.4f}', f'{climb_apex:.4f}', climb.end, f'{climb.duration:.4f}',
+                    f'{climb.cut_h:.4f}', f'{climb.cut_v:.4f}', f'{climb.cut_cos:.4f}']
         self.dec_csv_writer.writerow([
             f'{time.time():.6f}', f'{self.odom_stamp:.6f}', self.hop_number, int(self.steering_enabled),
             '' if self.path_id is None else f'{self.path_id:.6f}',
@@ -675,7 +693,7 @@ class hopcopter(Node):
             f'{fall_h:.4f}', f'{fall_time:.4f}', f'{land_vz:.4f}',
             f'{self.LSE.landing_x:.4f}', f'{self.LSE.landing_y:.4f}', *foot,
             *steer,
-            f'{self.JHC.nominal_height:.4f}', f'{self.JSTO.powered_climbing_end_timer:.4f}',
+            *push,
         ])
         self.dec_csv_file.flush()
 
@@ -786,6 +804,13 @@ class hopcopter(Node):
             # jumping state tracking
             self.JSTO.step(self.az, self.Diff_Z.data_rate) # pass acceleration in the z direction
 
+            # Powered climb toward this climb's target apex. The differentiated pose is world frame
+            # and right from the first tick after liftoff (the odom twist is body frame and reads
+            # low there); the tilt only scales the thrust that still arrives after the cut.
+            cos_tilt = 1.0 - 2.0 * (self.ori_x ** 2 + self.ori_y ** 2)
+            self._push_on = self.push.step(self.odom_stamp, self.JSTO.jumping_state, self.pos_z,
+                                           self.dvel_z, cos_tilt, self.desired_z)
+
             # Per-hop tracking: apex is the running max base z between touchdowns
             if self._arc_max_z is None or self.pos_z > self._arc_max_z:
                 self._arc_max_z = self.pos_z
@@ -801,7 +826,6 @@ class hopcopter(Node):
                 self.JSTO.init()
                 if self.JSTO.jumping_state_old == 1 and self.JSTO.jumping_state == 2: # first time landing
                     self.ready_to_drop = False
-                    self.JHC.estimate_height(Abs_time)
 
             if self.JSTO.jumping_state_old == 2 and self.JSTO.jumping_state == 3:  # takeoff
                 self.jumping_counter = self.jumping_counter + 1
@@ -814,7 +838,6 @@ class hopcopter(Node):
 
             if self.JSTO.jumping_state_old == 1 and self.JSTO.jumping_state == 2:  # landing
                 self.LSE.update_landing_location(X_f, Y_f, Abs_time)
-                self.JHC.estimate_height(Abs_time)
 
                 # --- Log landing foot position to CSV ---
                 foot_x, foot_y, foot_z = self._compute_foot_position(
@@ -867,11 +890,13 @@ class hopcopter(Node):
 
                 self._apex_abs_time = Abs_time
                 jumping_height_record = Z_f - self.leg_length
+                # The climb that just ended: its push, and the apex it reached
+                climb = self.push.pop_climb()
+                climb_apex = self._arc_max_z - self.push.z_lo
                 if True:
                     falling_time = math.sqrt(2 * max(jumping_height_record, 0.0) / self.G_flight_time_mocap)
                     landing_speed_z = - self.G_flight_time_mocap * falling_time
 
-                    self.JHC.update_apex_state(Abs_time, self.Diff_X.data_rate, self.Diff_Y.data_rate)
                     self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
                                        self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
                     landing_attitude_z_b = steer_log = None
@@ -881,20 +906,20 @@ class hopcopter(Node):
                         decision, landing_attitude_z_b, steer_log = self._decide_and_steer(
                             jumping_height_record, landing_speed_z, gzgt_robot_euler[0], Abs_time)
                         # The planned apex for that hop; hops in place use the default height
-                        jhc_target = decision.apex if decision.apex is not None else self.desired_rel_z
+                        target_apex = decision.apex if decision.apex is not None else self.desired_rel_z
                     else:
                         # Warm-up hop: fall level, in place, at the default height
                         self.LJC.roll = 0.0
                         self.LJC.pitch = 0.0
-                        jhc_target = self.desired_rel_z
+                        target_apex = self.desired_rel_z
 
-                    # Size the next powered climb for that apex
-                    self.desired_z = jhc_target
-                    self.JSTO.powered_climbing_end_timer = self.JHC.step(jhc_target)
-                    self._apex_target_set = jhc_target
+                    # The next climb's push aims at that apex
+                    self.desired_z = target_apex
+                    self._apex_target_set = target_apex
 
-                    self._log_apex_decision(jhc_target, jumping_height_record, falling_time,
-                                            landing_speed_z, landing_attitude_z_b, steer_log)
+                    self._log_apex_decision(target_apex, jumping_height_record, falling_time,
+                                            landing_speed_z, landing_attitude_z_b, steer_log,
+                                            climb, climb_apex)
 
                 # --- Finalize per-hop row with this arc's takeoff velocity + injection ---
                 if self._pending_hop_row is not None:
@@ -921,7 +946,7 @@ class hopcopter(Node):
                 elif self.JSTO.jumping_state == 2:
                     self.condition_log.append("2")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, self.desired_yaw,  1000 # stance, unpowered swing
-                elif self.JSTO.jumping_state == 3 and self.JSTO.powered_climbing_end_flag:
+                elif self.JSTO.jumping_state == 3 and self._push_on:
                     self.condition_log.append("3_true")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, self.desired_yaw,  self.powered_climbing_thrust  # powered climbing
                     push_active = True

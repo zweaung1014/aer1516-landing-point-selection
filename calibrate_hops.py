@@ -12,6 +12,9 @@ Reads the per-tick CSV that hopcopter writes to position_attitude_tracking/ and 
   - push thrust: IMU specific force during pushes against the motor model
   - command-to-thrust latency: push cutoff tick against the IMU specific-force drop
   - /cf_1/pose against Gazebo ground truth
+  - stage 2 push cutoff: the lead each push implies, apex error per target, 3->2 transitions
+    during a push, injection available within the 0.4 s cap against liftoff speed, and the
+    horizontal speed a push adds after a tilted liftoff
   - the matching apex_decisions_<ts>.csv, one row per apex
 
 Usage:
@@ -47,6 +50,11 @@ MIN_STANCE_TICKS = 3
 SPIN_DOWN = 0.08     # [s] skipped after a push before fitting unpowered flight
 ODOM_DT = 0.005      # odom period (200 Hz); diff_v spans one period
 TWIST_WINDOW = 0.05  # longest twist window tested (10 odom periods)
+# hopcopter's PushController settings, to read its decisions back
+PUSH_G_COAST = 9.55  # g' its cutoff assumes for the coast
+Z_LO = 0.366         # liftoff CoM height; apex heights are above it
+TICK = 0.01          # control period
+PUSH_CAP = 0.4       # t_max
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -216,6 +224,7 @@ def main():
 
     # ── g' and touchdown velocities, per flight ──
     g_fit, g_model, g_tilt, flights, rejected = [], [], [], [], 0
+    flight_g = []    # g' per flight, aligned with flights (None when not fitted)
     for k in range(len(stances)):
         td = stances[k][0]
         if k == 0:
@@ -228,6 +237,7 @@ def main():
         sel = (od_t >= t_a) & (od_t <= t_b)
         if np.sum(sel) < 10 or t_b - t_a < 0.12:
             flights.append(None)
+            flight_g.append(None)
             continue
         tt = od_t[sel] - t_td(stances[k])
         cz = np.polyfit(tt, od_p[sel, 2], 2)
@@ -237,6 +247,7 @@ def main():
         resid = od_p[sel, 2] - np.polyval(cz, tt)
         if not 7.0 < -2.0 * cz[0] < 12.0 or np.sqrt(np.mean(resid ** 2)) > 0.005:
             flights.append(None)
+            flight_g.append(None)
             rejected += 1
             continue
         g_fit.append(-2.0 * cz[0])
@@ -246,6 +257,7 @@ def main():
         g_tilt.append(np.degrees(np.arccos(np.clip(cos_tilt[rows].min(), -1, 1))))
         # velocity at touchdown, from the fit (unpowered all the way down)
         flights.append(np.array([cx[1], cy[1], cz[1]]))
+        flight_g.append(-2.0 * cz[0])
 
     print("\n== g' (unpowered flight, quadratic fit of z on sim time)")
     print(f"  fitted:          {stats(g_fit)}   ({rejected} non-ballistic segments rejected)")
@@ -260,10 +272,8 @@ def main():
     print(f"  {'hop':>3} {'t_sim':>8} {'v_td':>6} {'v_lo':>6} {'eta':>6} "
           f"{'tilt_td':>7} {'redir':>6} {'v_h_td':>6} {'v_h_lo':>6} {'stance_s':>8}")
     etas, rows_out = [], []
+    lo_vel = {}      # stance index -> (liftoff time, liftoff velocity)
     for k, s in enumerate(stances):
-        v_td = flights[k]
-        if v_td is None:
-            continue
         tl = t_lo(s)
         cand = np.flatnonzero(od_t >= t_imu[s[1]] + ODOM_DT)
         if len(cand) == 0:
@@ -275,6 +285,10 @@ def main():
         v_lo = od_dv[j].copy()                   # mean over [stamp - 5 ms, stamp]
         a_z = az[tick] * cos_tilt[tick] - G      # IMU says how much thrust is already on
         v_lo[2] -= a_z * (od_t[j] - 0.5 * ODOM_DT - tl)
+        lo_vel[k] = (tl, v_lo)
+        v_td = flights[k]
+        if v_td is None:
+            continue
         s_td, s_lo = np.linalg.norm(v_td), np.linalg.norm(v_lo)
         eta = (s_lo / s_td) ** 2
         redir = np.degrees(np.arccos(np.clip(np.dot(-v_td, v_lo) / (s_td * s_lo), -1, 1)))
@@ -336,8 +350,8 @@ def main():
             continue
         e = e[0]
         lens.append(t_imu[e] - t_imu[s0])
-        steady = np.arange(s0 + 3, e)                 # skip the spin-up
-        if len(steady) < 3:
+        steady = np.arange(s0 + 4, e)                 # skip the spin-up (94% thrust at 40 ms)
+        if len(steady) < 2:
             continue
         a_push = np.median(az[steady])
         acc_meas.append(a_push)
@@ -367,6 +381,113 @@ def main():
     print(f"  cutoff tick -> logged PWM halfway [s, wall]: {stats(lat_pwm)}   "
           f"(includes the telemetry return path)")
 
+    # ── Stage 2: push cutoff ──
+    dec_path = matching_decisions(path)
+    dec = pd.read_csv(dec_path) if dec_path else None
+    print("\n== Push cutoff (stage 2)")
+    n_32_push = int(np.sum((js[:-1] == 3) & (js[1:] == 2) & push[:-1]))
+    print(f"  3->2 transitions during a push: {n_32_push}")
+    a_cmd = 4 * motor_force(np.median(df.thrust_cmd.to_numpy()[push])) / MASS if push.any() else np.nan
+    if dec is None or "push_end" not in dec.columns:
+        print("  no stage 2 columns in the apex decisions")
+    else:
+        c = dec[dec.push_end.notna()]
+        print("  how pushes ended: " + ", ".join(f"{k} {v}" for k, v in c.push_end.value_counts().items()))
+        tgt = c[c.push_end == "target"]
+        if len(tgt):
+            # the thrust that kept coming after each cut, in seconds of full push, under the
+            # controller's own model (motor-model thrust, g' PUSH_G_COAST)
+            pred = tgt.cut_h + tgt.cut_vz ** 2 / (2 * PUSH_G_COAST)
+            lead = (tgt.climb_apex - pred) * PUSH_G_COAST / (tgt.cut_vz * a_cmd * tgt.cut_cos_tilt)
+            print(f"  lead each cut implies [s]: {stats(lead)}")
+            print(f"    -> t_lead = median + half a tick = {np.median(lead) + 0.5 * TICK:.3f} s")
+            err = tgt.climb_apex - tgt.climb_target
+            print(f"  apex - target, pushes cut at the target [m]: {stats(err)}")
+            for h, e in err.groupby(tgt.climb_target.round(2)):
+                print(f"    target {h:.2f}: {stats(e)}")
+        leg = c[c.push_end == "leg"]
+        if len(leg):
+            print(f"  apex - target, leg alone over the target (no push) [m]: "
+                  f"{stats(leg.climb_apex - leg.climb_target)}")
+
+    # ── Push capacity ──
+    print("\n== Push capacity: injection above idle, g'_flight * h_apex - v_z0^2 / 2 [J/kg]")
+    caps = []
+    for s0 in starts:
+        e = ends[ends > s0]
+        ks = [k for k, st in enumerate(stances) if t_imu[st[1]] <= t_imu[s0] + 1e-9]
+        if not len(e) or not ks or ks[-1] not in lo_vel or ks[-1] + 1 >= len(stances):
+            continue
+        k, e = ks[-1], e[0]
+        g_f = flight_g[k + 1]
+        if g_f is None:
+            continue
+        tl, v_lo = lo_vel[k]
+        sel = (od_t > tl) & (od_t < t_td(stances[k + 1]))
+        h = od_p[sel, 2].max() - Z_LO
+        caps.append((v_lo[2], t_imu[e] - t_imu[s0], h, g_f, g_f * h - 0.5 * v_lo[2] ** 2))
+    if len(caps) >= 3:
+        cp = np.array(caps)
+
+        def injection(v0, t_push, g_f, a_t, delta):
+            # level push at a_t from v0 for t_push + delta (spin-up, spin-down), above idle
+            t_e = np.minimum(t_push + delta, v0 / (G - a_t))   # it cannot push past the apex
+            return (a_t - (G - g_f)) * (v0 * t_e - 0.5 * (G - a_t) * t_e ** 2)
+
+        # Effective thrust and timing, in terms of the same liftoff speed as eta above (which is
+        # how the planner will get v_z0); the steady thrust itself is the motor model's
+        best = (np.inf, None, None)
+        for a_t in np.arange(6.5, 8.51, 0.01):
+            for delta in np.arange(-0.03, 0.0301, 0.001):
+                rms = np.sqrt(np.mean((injection(cp[:, 0], cp[:, 1], cp[:, 3], a_t, delta) - cp[:, 4]) ** 2))
+                if rms < best[0]:
+                    best = (rms, a_t, delta)
+        rms, a_t, delta = best
+        print(f"  {len(cp)} pushes, {cp[:, 1].min():.3f}-{cp[:, 1].max():.3f} s, v_z0 {cp[:, 0].min():.2f}-"
+              f"{cp[:, 0].max():.2f} m/s")
+        print(f"  fit: level push at {a_t:.2f} m/s^2 (motor model {a_cmd:.2f}) for the push time "
+              f"{delta * 1000:+.0f} ms; RMS {rms:.2f} J/kg")
+        g_lvl = np.median(g_fit[g_tilt < 5]) if np.any(g_tilt < 5) else PUSH_G_COAST
+        print(f"  available within the {PUSH_CAP} s cap (g' {g_lvl:.2f}):")
+        print(f"    {'v_z0':>5} {'J/kg':>6} {'apex_m':>6}")
+        for v0 in np.arange(1.0, 5.01, 0.5):
+            inj = injection(v0, PUSH_CAP, g_lvl, a_t, delta)
+            print(f"    {v0:5.1f} {inj:6.2f} {(0.5 * v0 * v0 + inj) / g_lvl:6.2f}")
+        hit = cp[cp[:, 1] >= PUSH_CAP - 0.5 * TICK]
+        for v0, t_p, h, g_f, inj in hit:
+            print(f"  measured at the cap: v_z0 {v0:.2f}, {t_p:.3f} s -> {inj:.2f} J/kg, apex {h:.2f} m "
+                  f"(fit {injection(v0, t_p, g_f, a_t, delta):.2f})")
+
+    # ── Push after a tilted liftoff (D2) ──
+    print("\n== Push after a tilted liftoff: horizontal speed it adds (liftoff -> 60 ms after the cut)")
+    rows_dv = []
+    for s0 in starts:
+        e = ends[ends > s0]
+        ks = [k for k, st in enumerate(stances) if t_imu[st[1]] <= t_imu[s0] + 1e-9]
+        if not len(e) or not ks or ks[-1] not in lo_vel:
+            continue
+        k, e = ks[-1], e[0]
+        v_h = lo_vel[k][1][:2]
+        tilt_lo = np.degrees(np.arccos(np.clip(cos_tilt[s0], -1, 1)))
+        j = np.flatnonzero(od_t >= t_imu[e] + 0.06)
+        if np.hypot(*v_h) < 0.3 or not len(j) or (k + 1 < len(stances) and od_t[j[0]] >= t_td(stances[k + 1])):
+            continue
+        u = v_h / np.hypot(*v_h)
+        dv = od_dv[j[0], :2] - v_h
+        # model: the push's horizontal thrust along the logged attitude
+        model = sum(a_cmd * rot_zyx(yaw[i], pitch[i], roll[i])[:2, 2] * TICK for i in range(s0, e))
+        rows_dv.append((t_imu[s0], tilt_lo, t_imu[e] - t_imu[s0], np.hypot(*v_h),
+                        dv @ u, u[0] * dv[1] - u[1] * dv[0], model @ u))
+    if rows_dv:
+        print(f"  {'t_sim':>8} {'tilt_lo':>7} {'push_s':>6} {'v_h_lo':>6} {'dv_along':>8} {'dv_cross':>8} "
+              f"{'model':>6}")
+        for r in rows_dv:
+            print(f"  {r[0]:8.2f} {r[1]:7.1f} {r[2]:6.3f} {r[3]:6.2f} {r[4]:8.3f} {r[5]:8.3f} {r[6]:6.3f}")
+        r = np.array(rows_dv)
+        print(f"  dv_along [m/s]: {stats(r[:, 4])};  model: {stats(r[:, 6])}")
+    else:
+        print("  no pushes after a steered landing")
+
     # ── /cf_1/pose vs ground truth ──
     print("\n== /cf_1/pose vs Gazebo ground truth")
     pose_rows = np.flatnonzero(~df.cf_pose_stamp.duplicated().to_numpy() & (df.cf_pose_stamp > 0).to_numpy())
@@ -392,13 +513,12 @@ def main():
         print(f"  ({len(pose_rows)} pose messages; the firmware publishes /cf_1/pose at 10 Hz)")
 
     # ── Apex decisions ──
-    dec_path = matching_decisions(path)
     print("\n== Apex decisions" + (f": {dec_path}" if dec_path else ": no matching apex_decisions CSV"))
-    if dec_path:
-        dec = pd.read_csv(dec_path)
+    if dec is not None:
         cols = ["hop_number", "decided", "mode", "land_idx", "target_idx", "retries",
                 "foot_land_x", "foot_land_y", "target_x", "target_y", "target_apex",
                 "takeoff_elev_deg", "unreachable", "planned_tilt_deg", "cmd_tilt_deg",
+                "climb_target", "climb_apex", "push_end", "push_s",
                 "jhc_nominal_h", "push_time"]
         cols = [c for c in cols if c in dec.columns]   # older logs lack the stage 1 columns
         with pd.option_context("display.width", 220, "display.max_rows", 200):

@@ -3,6 +3,7 @@
   */
 
 #include "crazysim_plugin.h"
+#include <algorithm>
 #include <future>
 
 #include <gz/plugin/Register.hh>
@@ -12,6 +13,13 @@ GZ_ADD_PLUGIN(crazyflie_interface::GzCrazyflieInterface,
 			  crazyflie_interface::GzCrazyflieInterface::ISystemPreUpdate,
 			  crazyflie_interface::GzCrazyflieInterface::ISystemPostUpdate)
 using namespace crazyflie_interface;
+
+// Raw IMU counts saturate at the int16 limits (+-16 g, +-2000 deg/s), as a real sensor's full scale
+// does. A plain cast of an out-of-range value wraps: a hopping robot's 20-30 g stance then reads as
+// upside down, and the supervisor's tumble check locks the motors.
+static int16_t toImuCounts(double counts) {
+	return static_cast<int16_t>(std::clamp(counts, -32768.0, 32767.0));
+}
 
 GzCrazyflieInterface::GzCrazyflieInterface() :
 	namespace_(kDefaultNamespace),
@@ -143,12 +151,12 @@ void GzCrazyflieInterface::ImuCallback(const gz::msgs::IMU& imu_msg) {
 	struct imu_s m_imu_info = {
 		.header = crtp(CRTP_PORT_SETPOINT_SIM, 0),
 		.type = SENSOR_GYRO_ACC_SIM,
-		.acc = { static_cast<int16_t>(imu_msg.linear_acceleration().x()  	/ 	SENSORS_G_PER_LSB_CFG 		/ GRAVITY_MAGNITUDE_CF),
-				 static_cast<int16_t>(imu_msg.linear_acceleration().y()  	/ 	SENSORS_G_PER_LSB_CFG 		/ GRAVITY_MAGNITUDE_CF),
-				 static_cast<int16_t>(imu_msg.linear_acceleration().z()  	/ 	SENSORS_G_PER_LSB_CFG 		/ GRAVITY_MAGNITUDE_CF)},
-		.gyro = {static_cast<int16_t>(imu_msg.angular_velocity().x()	   	/ 	SENSORS_DEG_PER_LSB_CFG	 	/ DEG_TO_RAD_CF),
-				 static_cast<int16_t>(imu_msg.angular_velocity().y()    	/ 	SENSORS_DEG_PER_LSB_CFG 	/ DEG_TO_RAD_CF),
-				 static_cast<int16_t>(imu_msg.angular_velocity().z()    	/	SENSORS_DEG_PER_LSB_CFG		/ DEG_TO_RAD_CF)}};
+		.acc = { toImuCounts(imu_msg.linear_acceleration().x()  	/ 	SENSORS_G_PER_LSB_CFG 		/ GRAVITY_MAGNITUDE_CF),
+				 toImuCounts(imu_msg.linear_acceleration().y()  	/ 	SENSORS_G_PER_LSB_CFG 		/ GRAVITY_MAGNITUDE_CF),
+				 toImuCounts(imu_msg.linear_acceleration().z()  	/ 	SENSORS_G_PER_LSB_CFG 		/ GRAVITY_MAGNITUDE_CF)},
+		.gyro = {toImuCounts(imu_msg.angular_velocity().x()	   	/ 	SENSORS_DEG_PER_LSB_CFG	 	/ DEG_TO_RAD_CF),
+				 toImuCounts(imu_msg.angular_velocity().y()    	/ 	SENSORS_DEG_PER_LSB_CFG 	/ DEG_TO_RAD_CF),
+				 toImuCounts(imu_msg.angular_velocity().z()    	/	SENSORS_DEG_PER_LSB_CFG		/ DEG_TO_RAD_CF)}};
 
 	crtpPacket_t msg;
 	msg.size = sizeof(m_imu_info);

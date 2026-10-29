@@ -48,7 +48,6 @@
 #define SENSORS_G_PER_LSB_CFG                             (float)((2 * 16) / 65536.0)
 
 #define SENSORS_BIAS_SAMPLES                              2000
-#define SENSORS_ACC_SCALE_SAMPLES                         1000
 
 #define SENSORS_GYRO_BIAS_CALCULATE_STDDEV
 
@@ -95,7 +94,9 @@ static Axis3f  gyroBias;
 static Axis3f  gyroBiasStdDev;
 #endif
 static bool  gyroBiasFound = false;
-static float accScaleSum = 0;
+// Gazebo's accelerometer has no scale error. The scale calibration this replaces assumed the
+// platform rests at 1 g after the gyro bias is found; a hopping robot is in flight then, and the
+// scale came out ~0.54, so idle coasts read above the supervisor's free-fall threshold (0.1 g).
 static float accScale = 1;
 
 // Low Pass filtering <---> Not sure if needed when doing simulation
@@ -127,7 +128,6 @@ static bool processGyroBiasNoBuffer(int16_t gx, int16_t gy, int16_t gz, Axis3f *
 #else
 static bool processGyroBias(int16_t gx, int16_t gy, int16_t gz,  Axis3f *gyroBiasOut);
 #endif
-static bool processAccScale(int16_t ax, int16_t ay, int16_t az);
 static void sensorsBiasObjInit(BiasObj* bias);
 static void sensorsCalculateVarianceAndMean(BiasObj* bias, Axis3f* varOut, Axis3f* meanOut);
 /*static void sensorsCalculateBiasMean(BiasObj* bias, Axis3i32* meanOut);*/
@@ -264,10 +264,6 @@ void processAccGyroMeasurements(const uint8_t *buffer)
 #else
   gyroBiasFound = processGyroBias(gyroData->x, gyroData->y, gyroData->z, &gyroBias);
 #endif
-  if (gyroBiasFound)
-  {
-     processAccScale(accData->x, accData->y, accData->z);
-  }
 
   sensors.gyro.x =  (gyroData->x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
   sensors.gyro.y =  (gyroData->y - gyroBias.y) * SENSORS_DEG_PER_LSB_CFG;
@@ -347,30 +343,6 @@ bool sensorsSimTest(void)
   }
 
   return testStatus;
-}
-
-/**
- * Calculates accelerometer scale out of SENSORS_ACC_SCALE_SAMPLES samples. Should be called when
- * platform is stable.
- */
-static bool processAccScale(int16_t ax, int16_t ay, int16_t az)
-{
-  static bool accBiasFound = false;
-  static uint32_t accScaleSumCount = 0;
-
-  if (!accBiasFound)
-  {
-    accScaleSum += sqrtf(powf(ax * SENSORS_G_PER_LSB_CFG, 2) + powf(ay * SENSORS_G_PER_LSB_CFG, 2) + powf(az * SENSORS_G_PER_LSB_CFG, 2));
-    accScaleSumCount++;
-
-    if (accScaleSumCount == SENSORS_ACC_SCALE_SAMPLES)
-    {
-      accScale = accScaleSum / SENSORS_ACC_SCALE_SAMPLES;
-      accBiasFound = true;
-    }
-  }
-
-  return accBiasFound;
 }
 
 #ifdef GYRO_BIAS_LIGHT_WEIGHT

@@ -21,6 +21,7 @@ from functools import partial
 from sensor_msgs.msg import Imu
 from visualization_msgs.msg import Marker
 from grid_map_msgs.msg import GridMap
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
 
 import csv
@@ -138,10 +139,12 @@ class hopcopter(Node):
         ## This is used to obtain pose from the firmware. Calculated by integrating acceleration twice.
         self.pose = self.create_subscription(PoseStamped, '/cf_1/pose', self.robot_pose, 50)
         self.current_pos = self.current_ori = None
-        
+        self.cf_pose_stamp = 0.0  # header stamp of the latest /cf_1/pose (published at 10 Hz)
+
         ## This is used to obtain acceleration data from the firmware. Not accurate enough.
         self.imu = self.create_subscription(LogDataGeneric, '/cf_1/imu', self.motorPower, 50)
         self.motor_m1, self.motor_m2, self.motor_m3, self.motor_m4 = 0.0, 0.0, 0.0, 0.0
+        self.motor_fw_ms = 0  # firmware tick [ms] of the latest motor PWM log packet
 
         ## Motor PWM feedback (motor.m1..m4), logged by crazyswarm2 as 'motorpower'.
         self.motorpower = self.create_subscription(LogDataGeneric, '/cf_1/motorpower', self.motorPower, 50)
@@ -149,12 +152,19 @@ class hopcopter(Node):
         # This is used to obtain acceleration from Gazebo ground truth
         self.gz_imu = self.create_subscription(Imu, '/cf_0/imu', self.gz_imu_acceleration, 50)
         self.ax = self.ay = self.az = 0.0
+        self.imu_az = 0.0      # raw z specific force [m/s^2] (self.az is the same divided by G)
+        self.imu_stamp = 0.0   # sim time [s]
 
         # This is used to obtain velocity and position/orientation from Gazebo ground truth
         self.gz_odom = self.create_subscription(Odometry, '/cf_0/odom', self.gz_odom_velocity, 50)
         self.vel_x, self.vel_y, self.vel_z = 0.0, 0.0, 0.0
         self.pos_x, self.pos_y, self.pos_z = 0.0, 0.0, 0.0
         self.ori_x, self.ori_y, self.ori_z, self.ori_w = 0.0, 0.0, 0.0, 0.0
+        # World-frame velocity from differentiating consecutive odom poses on their
+        # stamps, logged next to the odom twist to calibrate the twist's frame and lag
+        self.odom_stamp = 0.0  # sim time [s]
+        self.dvel_x, self.dvel_y, self.dvel_z = 0.0, 0.0, 0.0
+        self._odom_prev = None  # (stamp, x, y, z) of the previous odom message
 
         # Trajectory following variables
         self.waypoint_list = []  # List of (x, y, z) tuples
@@ -164,16 +174,21 @@ class hopcopter(Node):
         self.last_waypoint_position = None  # Store last completed waypoint
         self.pending_new_traj = False       # True between DELETE and ADD to avoid jumps
         self.trajectory_received = False    # Only allow control after first trajectory received
-        
+        self.path_id = None                 # header stamp [s] of the accepted id=400 marker
+        self._path_xy = []                  # its waypoints as published, before gating
+
         # Initialize desired positions as None until trajectory is received
         self.desired_x = None
         self.desired_y = None
         # desired_z is the hop apex height above the takeoff ground, taken from
         # the planner's waypoint z (target_apex); desired_rel_z is the default
         # used before a path arrives, during warm-up, and after the last waypoint.
-        self.desired_rel_z = 0.8
+        # desired_rel_z is a ROS parameter so an in-place apex sweep can change it
+        # at runtime: ros2 param set /hopcopter desired_rel_z 1.0
+        self.desired_rel_z = self.declare_parameter('desired_rel_z', 0.8).value
         self.desired_z = self.desired_rel_z
         self.desired_yaw = 0.0
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
         # Ground elevation lookup from /elevation_map (_ground_elevation_at).
         # Currently unused: hop height comes from the planner's target_apex.
@@ -313,9 +328,42 @@ class hopcopter(Node):
             'timestamp', 'jumping_state', 'hop_number',
             'des_roll_deg', 'des_pitch_deg', 'des_yaw_deg',
             'act_roll_deg', 'act_pitch_deg', 'act_yaw_deg',
+            # Gazebo ground truth: odom pose, velocity differentiated from it, odom twist
+            'odom_stamp', 'pos_x', 'pos_y', 'pos_z',
+            'diff_vx', 'diff_vy', 'diff_vz',
+            'odom_vx', 'odom_vy', 'odom_vz',
+            'imu_stamp', 'imu_az',
+            # what was commanded and what the motors did
+            'thrust_cmd', 'push',
+            'motor_m1', 'motor_m2', 'motor_m3', 'motor_m4', 'motor_fw_ms',
+            # the firmware's own estimate (/cf_1/pose), same angle conventions as act_*
+            'cf_pose_stamp', 'cf_x', 'cf_y', 'cf_z',
+            'cf_roll_deg', 'cf_pitch_deg', 'cf_yaw_deg',
         ])
         self._att_rows = 0
         self.get_logger().info(f'Attitude-tracking CSV: {att_csv_filename}')
+
+        # === Per-apex decision CSV logger (one row per 3 -> 1 transition) ===
+        dec_csv_filename = os.path.join(
+            hop_dir,
+            f"apex_decisions_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+        )
+        self.dec_csv_file = open(dec_csv_filename, 'w', newline='')
+        self.dec_csv_writer = csv.writer(self.dec_csv_file)
+        self.dec_csv_writer.writerow([
+            'timestamp', 'odom_stamp', 'hop_number', 'steering',
+            'path_id', 'target_idx', 'wp_remaining',
+            'target_x', 'target_y', 'target_apex',
+            'apex_x', 'apex_y', 'apex_z',
+            'odom_vx', 'odom_vy', 'odom_vz',
+            'diff_vx', 'diff_vy', 'diff_vz',
+            'fall_h', 'fall_time', 'land_vz',
+            'pred_land_x', 'pred_land_y',
+            'takeoff_heading_deg', 'takeoff_elev_deg', 'unreachable',
+            'cmd_roll_deg', 'cmd_pitch_deg', 'cmd_tilt_deg', 'theta_v_deg',
+            'jhc_nominal_h', 'push_time',
+        ])
+        self.get_logger().info(f'Apex-decision CSV: {dec_csv_filename}')
 
     # ------------------------------------------------------------------
     #  Compute foot contact position in world frame
@@ -356,7 +404,7 @@ class hopcopter(Node):
         - msg.header.frame_id  : reference frame (often 'world' or 'odom')
         - msg.child_frame_id   : moving body frame (e.g., 'cf_0/base_link')
         - twist.twist.linear.* : velocity of child w.r.t. header frame, expressed in child_frame_id
-            (this is the standard nav_msgs/Odometry convention; confirm by inspecting frames).
+            (measured 2026-10-29 with calibrate_hops.py: body frame, ~10 ms window).
         """
         # Extract position data
         self.pos_x = msg.pose.pose.position.x
@@ -373,6 +421,17 @@ class hopcopter(Node):
         self.vel_x = msg.twist.twist.linear.x
         self.vel_y = msg.twist.twist.linear.y
         self.vel_z = msg.twist.twist.linear.z
+
+        # Differentiate the pose on the message stamps (sim time)
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self._odom_prev is not None:
+            dt = stamp - self._odom_prev[0]
+            if dt > 0.0:
+                self.dvel_x = (self.pos_x - self._odom_prev[1]) / dt
+                self.dvel_y = (self.pos_y - self._odom_prev[2]) / dt
+                self.dvel_z = (self.pos_z - self._odom_prev[3]) / dt
+        self._odom_prev = (stamp, self.pos_x, self.pos_y, self.pos_z)
+        self.odom_stamp = stamp
 
         # FOR DEBUGGING: track jumping state if conditions
         self.condition_log = []
@@ -392,9 +451,10 @@ class hopcopter(Node):
         self.ax = acc.x/self.G
         self.ay = acc.y/self.G
         self.az = acc.z/self.G
+        self.imu_az = acc.z
 
-        # optional: timestamp in seconds (float)
-        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        # timestamp in seconds (float), sim time
+        self.imu_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
     def elevation_map_callback(self, msg: GridMap) -> None:
         """Cache the 'elevation' layer of the 2.5D map for ground lookups."""
@@ -465,6 +525,10 @@ class hopcopter(Node):
 
                 # Require more than 1 point to treat it as a trajectory
                 if len(msg.points) > 1:
+                    # Identify the path in the decision log by the marker's stamp
+                    self.path_id = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+                    self._path_xy = [(float(p.x), float(p.y)) for p in msg.points]
+
                     # Apply follower-gating to filter out "behind" points
                     filtered_points = self.apply_follower_gating(msg.points)
                     
@@ -596,17 +660,71 @@ class hopcopter(Node):
 
         # 2. Unpack in the declared order
         self.motor_m1, self.motor_m2, self.motor_m3, self.motor_m4 = msg.values[:4]
-    
+        self.motor_fw_ms = msg.timestamp
+
     def robot_pose(self, msg):
         print("At robot_pose()")
 
         self.current_pos = msg.pose.position
         self.current_ori = msg.pose.orientation
+        self.cf_pose_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         # self.get_logger().info(
         #     f"///LOGGING INFO FROM robot_pose()/// Position: x={self.current_pos.x}, y={self.current_pos.y}, z={self.current_pos.z} | "
         #     f"Orientation (quaternion): x={self.current_ori.x}, y={self.current_ori.y}, z={self.current_ori.z}, w={self.current_ori.w}"
         # )
     
+    def _on_set_parameters(self, params):
+        """Apply a runtime change of desired_rel_z (in-place apex sweeps)."""
+        for p in params:
+            if p.name == 'desired_rel_z':
+                if p.value <= 0.0:
+                    return SetParametersResult(successful=False, reason='desired_rel_z must be > 0')
+                self.desired_rel_z = p.value
+                # Hopping in place (no path yet, or past the last waypoint) uses
+                # desired_z after warm-up, so it follows the new value too
+                if not self.has_active_goal:
+                    self.desired_z = p.value
+                self.get_logger().info(f'desired_rel_z set to {p.value:.3f} m')
+        return SetParametersResult(successful=True)
+
+    def _target_index(self):
+        """Index in the published path of the waypoint being aimed at, or '' with no path."""
+        if not self._path_xy or self.desired_x is None:
+            return ''
+        return min(range(len(self._path_xy)),
+                   key=lambda i: (self._path_xy[i][0] - self.desired_x) ** 2
+                   + (self._path_xy[i][1] - self.desired_y) ** 2)
+
+    def _log_apex_decision(self, target_apex, fall_h, fall_time, land_vz, landing_attitude_z_b):
+        """One row per apex: the state the controller acted on and what it commanded.
+        landing_attitude_z_b is None on warm-up apexes, which do not steer."""
+        if landing_attitude_z_b is not None:
+            tv = self.LJC.takeoff_velocity  # unit takeoff direction handed to the stance model
+            steer = [
+                f'{math.degrees(math.atan2(tv[1], tv[0])):.3f}',
+                f'{math.degrees(math.asin(self.saturation(tv[2], 1.0, -1.0))):.3f}',
+                int(self.LJC.norm_d > self.LJC.norm_d_max),
+                f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}',
+                f'{math.degrees(math.acos(self.saturation(landing_attitude_z_b[2], 1.0, -1.0))):.3f}',
+                f'{math.degrees(self.IPJM.theta_v):.3f}',
+            ]
+        else:
+            steer = ['', '', '', f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}', '', '']
+        self.dec_csv_writer.writerow([
+            f'{time.time():.6f}', f'{self.odom_stamp:.6f}', self.hop_number, int(self.steering_enabled),
+            '' if self.path_id is None else f'{self.path_id:.6f}',
+            self._target_index(), len(self.waypoint_list),
+            f'{self.desired_x:.4f}', f'{self.desired_y:.4f}', f'{target_apex:.4f}',
+            f'{self.pos_x:.4f}', f'{self.pos_y:.4f}', f'{self.pos_z:.4f}',
+            f'{self.vel_x:.4f}', f'{self.vel_y:.4f}', f'{self.vel_z:.4f}',
+            f'{self.dvel_x:.4f}', f'{self.dvel_y:.4f}', f'{self.dvel_z:.4f}',
+            f'{fall_h:.4f}', f'{fall_time:.4f}', f'{land_vz:.4f}',
+            f'{self.LSE.landing_x:.4f}', f'{self.LSE.landing_y:.4f}',
+            *steer,
+            f'{self.JHC.nominal_height:.4f}', f'{self.JSTO.powered_climbing_end_timer:.4f}',
+        ])
+        self.dec_csv_file.flush()
+
     def saturation(self, x, max_x, min_x):
         if x > max_x:
             return max_x
@@ -815,6 +933,7 @@ class hopcopter(Node):
 
                     self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
                                        self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
+                    landing_attitude_z_b = None
                     if self.steering_enabled:
                         self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, ) # set desired x and y
                         self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, ) #keep track of current state in real time
@@ -823,11 +942,14 @@ class hopcopter(Node):
                         self.LJC.jumping_planning()
 
                         # Stance phase model - calculate landing attitude and roll/pitch commands
-                        self.LJC.inverse_jumping_model(gzgt_robot_euler[0], Abs_time) # calculate landing attitude
+                        landing_attitude_z_b = self.LJC.inverse_jumping_model(gzgt_robot_euler[0], Abs_time) # calculate landing attitude
                     else:
                         # Warm-up hop: fall level, in place
                         self.LJC.roll = 0.0
                         self.LJC.pitch = 0.0
+
+                    self._log_apex_decision(jhc_target, jumping_height_record, falling_time,
+                                            landing_speed_z, landing_attitude_z_b)
 
                 # --- Finalize per-hop row with this arc's takeoff velocity + injection ---
                 if self._pending_hop_row is not None:
@@ -842,6 +964,7 @@ class hopcopter(Node):
                     self._pending_hop_row = None
 
         # Determine state and assign the appropriate commands
+        push_active = False  # powered climb commanded this tick
         if self.controller_start_flag:
             if self.flight_enable:
                 self.condition_log.append("flight_enable")
@@ -856,6 +979,7 @@ class hopcopter(Node):
                 elif self.JSTO.jumping_state == 3 and self.JSTO.powered_climbing_end_flag:
                     self.condition_log.append("3_true")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, self.desired_yaw,  self.powered_climbing_thrust  # powered climbing
+                    push_active = True
                 elif self.JSTO.jumping_state == 3:
                     self.condition_log.append("3_false")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, self.desired_yaw, 1000  # climbing
@@ -865,6 +989,7 @@ class hopcopter(Node):
                 if self.ready_to_drop:
                     self.condition_log.append("ready_to_drop")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, self.desired_yaw,  1000
+                    push_active = False
         else:
             self.condition_log.append("false")
             roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, 0, 0
@@ -875,6 +1000,17 @@ class hopcopter(Node):
             f'{roll_flight:.4f}', f'{pitch_flight:.4f}', f'{math.degrees(self.desired_yaw):.4f}',
             f'{math.degrees(gzgt_robot_euler[2]):.4f}', f'{-math.degrees(gzgt_robot_euler[1]):.4f}',
             f'{math.degrees(gzgt_robot_euler[0]):.4f}',
+            f'{self.odom_stamp:.6f}', f'{self.pos_x:.6f}', f'{self.pos_y:.6f}', f'{self.pos_z:.6f}',
+            f'{self.dvel_x:.5f}', f'{self.dvel_y:.5f}', f'{self.dvel_z:.5f}',
+            f'{self.vel_x:.5f}', f'{self.vel_y:.5f}', f'{self.vel_z:.5f}',
+            f'{self.imu_stamp:.6f}', f'{self.imu_az:.4f}',
+            f'{thrust_flight:.0f}', int(push_active),
+            f'{self.motor_m1:.0f}', f'{self.motor_m2:.0f}', f'{self.motor_m3:.0f}', f'{self.motor_m4:.0f}',
+            self.motor_fw_ms,
+            f'{self.cf_pose_stamp:.6f}',
+            f'{self.current_pos.x:.6f}', f'{self.current_pos.y:.6f}', f'{self.current_pos.z:.6f}',
+            f'{math.degrees(robot_euler[2]):.4f}', f'{-math.degrees(robot_euler[1]):.4f}',
+            f'{math.degrees(robot_euler[0]):.4f}',
         ])
         self._att_rows += 1
         if self._att_rows % 100 == 0:
@@ -918,6 +1054,9 @@ def main():
         # Close the attitude-tracking CSV file
         if hasattr(node, 'att_csv_file') and not node.att_csv_file.closed:
             node.att_csv_file.close()
+        # Close the apex-decision CSV file
+        if hasattr(node, 'dec_csv_file') and not node.dec_csv_file.closed:
+            node.dec_csv_file.close()
     node.destroy_node()
     rclpy.shutdown()
 

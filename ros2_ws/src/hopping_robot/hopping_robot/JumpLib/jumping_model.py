@@ -100,6 +100,9 @@ class LinearJumpingController:
         self.takeoff_velocity = np.array([0, 0, 2])
         self.landing_x = 0.0
         self.landing_y = 0.0
+        # aim distance and the most this hop's energy can reach (norm_d > norm_d_max: unreachable, 45° takeoff)
+        self.norm_d = 0.0
+        self.norm_d_max = 0.0
 
         self.roll = 0.0
         self.pitch = 0.0
@@ -144,6 +147,7 @@ class LinearJumpingController:
             d_x = self.velocity_gain * (self.desired_x - self.landing_x)
             d_y = self.velocity_gain * (self.desired_y - self.landing_y)
         norm_d = math.sqrt(d_x * d_x + d_y * d_y)
+        self.norm_d, self.norm_d_max = norm_d, norm_d_max
 
         # This means: if the distance is greater than the maximum reachable distance,
         if norm_d > norm_d_max:

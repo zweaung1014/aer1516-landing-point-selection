@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.8)
 project(ballistic_motion_planner)
 
+# Default to an optimized build: unoptimized, the A* runs about 3x slower
+# (10.6 s vs 3.1 s for one low_wall goal). An explicit
+# -DCMAKE_BUILD_TYPE=... still wins.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

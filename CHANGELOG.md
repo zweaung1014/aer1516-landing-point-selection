@@ -3,6 +3,25 @@
 ## [Unreleased]
 
 ### Added
+- **Stage 0 instrumentation (`docs/follow_planner_plan.md`)**: the per-tick
+  `position_attitude_tracking/attitude_*.csv` gains, after its existing columns: the odom stamp
+  (sim time) and pose, the velocity differentiated from consecutive odom poses on their stamps
+  (`diff_v*`) next to the odom twist (`odom_v*`), the IMU stamp and z specific force, the thrust
+  command and a push flag, the four motor PWMs with the firmware tick, and `/cf_1/pose` position
+  and attitude with its stamp (diagnosis item 4). The differentiated velocity is there because
+  the twist is a 50 ms window mean whose frame was unverified. Existing columns are unchanged, so
+  `visualize_rpy.py` still works.
+- **Per-apex decision log**: `hop_tracking/apex_decisions_*.csv`, one row per 3 → 1 transition:
+  path id (marker stamp), target index and waypoint, apex state, fall height and time, LSE's
+  predicted landing, LJC's takeoff direction and an `unreachable` flag (its 45° fallback), the
+  commanded landing attitude and tilt, fcn1's redirection angle, JHC's energy estimate and the
+  push time. `LinearJumpingController` now keeps `norm_d` / `norm_d_max` for the flag.
+- **`desired_rel_z` is a ROS parameter** (default 0.8 m), so stage 2's in-place apex sweep can
+  run in one session: `ros2 param set /hopcopter desired_rel_z 1.0`. With no active waypoint it
+  also updates `desired_z`, which drives in-place hops after warm-up.
+- **`calibrate_hops.py`** (repo root): reads the newest per-tick CSV and reports the real-time
+  factor, g′, η per stance (with landing speed, tilt and redirection angle), the odom twist
+  frame, push thrust against the motor model, push-cutoff latency, and `/cf_1/pose` error.
 - **Planner-commanded hop height (`target_apex`)**: the `/ballistic_trajectory` marker's point z
   is now each waypoint's `target_apex` = `apex_drop + Z` of the hop that lands on it (planned
   apex height above that hop's takeoff ground), and `output.hover_offset` (0.8 m) for the start
@@ -19,6 +38,10 @@
   `ballistic_path_*.csv` z now matches the published marker z.
 
 ### Changed
+- **`ballistic_motion_planner` builds Release by default**: `CMakeLists.txt` sets
+  `CMAKE_BUILD_TYPE=Release` when none is given; it was empty, i.e. unoptimized. The A* ran
+  about 3× slower that way (one low_wall goal: 10.6 s vs 3.1 s). `ballistic_parity_test` output
+  is byte-identical (0.60 s → 0.17 s). An explicit `-DCMAKE_BUILD_TYPE` still wins.
 - **`low_wall` moved +1.3 m in x**: the wall now sits at world x ∈ [2.5, 2.7] (was [1.2, 1.4]),
   giving the robot more room before the wall. Changed in both `elevation_map_publisher`
   (`wall.x_min` / `wall.x_max` defaults) and the Gazebo world `crazysim_low_wall.sdf` (pose x

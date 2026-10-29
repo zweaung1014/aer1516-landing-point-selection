@@ -51,7 +51,7 @@ under `crazyflie-firmware/tools/crazyflie-simulation/`). The project's own code 
 cd ~/CrazySim/ros2_ws
 source /opt/ros/humble/setup.bash
 colcon build                                          # full workspace
-colcon build --packages-select ballistic_motion_planner   # one package (C++ changes)
+colcon build --packages-select ballistic_motion_planner   # one package (C++ changes; builds Release by default)
 source install/setup.bash                             # required in EVERY terminal
 ```
 
@@ -80,6 +80,12 @@ python graph_results.py              # latest data/data_rrt_star/ path, XY plot 
 
 Both default to the newest CSV in the relevant `data/` subdirectory. Note their axis
 convention: **+x is drawn vertically up, +y horizontally left.**
+
+For the live pipeline, `python visualize_rpy.py` plots commanded vs actual attitude and
+`python calibrate_hops.py` reports g′, η per stance, the odom twist frame, push thrust, cutoff
+latency and `/cf_1/pose` error. Both read hopcopter's newest per-tick
+`data/data_ballistic_planner/position_attitude_tracking/attitude_*.csv` and need pandas (the repo
+`.venv`, not `/usr/bin/python3`). Per-apex decisions go to `hop_tracking/apex_decisions_*.csv`.
 
 ## Architecture
 
@@ -111,7 +117,8 @@ consumes the marker (id=400), holds `self.waypoint_list`, and pops the next targ
 current one is inside `current_goal_tolerance`, holding the last position when the list
 empties. `_load_next_waypoint` sets `desired_x/y` from the waypoint and `desired_z` from its z
 (the planner's `target_apex`); `desired_z` falls back to `desired_rel_z` (0.8 m) before a path
-arrives and after the last waypoint. At each apex (3 → 1) `JumpingHeightController.step()` turns
+arrives and after the last waypoint. `desired_rel_z` is a ROS parameter that can change mid-run
+(`ros2 param set /hopcopter desired_rel_z 1.0`). At each apex (3 → 1) `JumpingHeightController.step()` turns
 `desired_z` into the next powered-climb duration (fixed thrust, duration clamped to
 `t_p_low..t_p_high`) — this is how hop height follows the plan. Warm-up hops use
 `desired_rel_z`. Height control is approximate: JHC estimates the last hop's energy from fall

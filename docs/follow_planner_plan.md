@@ -1,7 +1,7 @@
 # Plan: make the controller fly the planner's plan
 
-Status: stages 0–2 implemented and tested 2026-10-29 (results in each stage), and problem 2
-fixed along the way (stage 2 results); stages 3–4 proposed.
+Status: stages 0–3 implemented and tested 2026-10-29 (results in each stage), and problem 2
+fixed along the way (stage 2 results); stage 4 proposed.
 Written 2026-10-29; decisions D1–D6 made the same day. Follows [diagnosis.md](diagnosis.md).
 
 All four problems in the diagnosis come down to one thing: the controller does not fly what the
@@ -427,6 +427,57 @@ For comparison, legacy at node defaults plans the 10:53 detour, with tilts of 15
   unbinned speeds across η 0.71–0.85.
 - Re-run the 13-case matrix and stairs. Search effort should stay near legacy (stairs 25.5k
   expansions against 25.8k).
+
+### Stage 3 results (2026-10-29)
+
+Implemented behind `search.momentum_aware`, which is on by default, with the robot's parameters
+as the node's defaults (`ballistic::robot_params()`). `PlannerParams` keeps the reference
+defaults for `ballistic_parity_test`. Implementation notes, including where it differs from
+the text above:
+- **Vertical push**: `feasible_alpha_interval_vertical_push`, with the 42° leg-angle floor
+  inside the closed-form bound.
+- **Push-capacity gate**: stage 2's fit (7.55 m/s², −1 ms, g′ 9.55, 0.4 s). It is checked at the
+  bottom of the arrival's speed bin, not at its centre. At the centre, the reference-config
+  stairs plan put two pushes at 99% of capacity, and they failed with real speeds at η ≤ 0.76.
+  With the robot's parameters the gate never binds: the 4 J/kg cap binds first.
+- **Stance model**: `ballistic::stance` is fcn1. Only k2 is a parameter (`stance.k2`); k1 sets
+  the liftoff attitude, which no planner check uses.
+- **Banking**: each of the 4 banking angles is checked on its own. The prototype skipped them
+  whenever the least-injection angle failed the tilt check. All 15 plans and the run times came
+  out the same either way.
+- **η(θ)**: η stays one constant. Each stance's redirection angle θ_v is computed
+  (`path_stances()`), but nothing depends on it yet.
+- **Exact re-check**: it never failed in the 15 cases.
+- **Seed**: √(2g·h_initial) = 3.96 m/s, binned to 4.0.
+- **`validate_params`**: it expands the start once on flat ground with the search's own edge
+  test.
+- **`HopPlan`**: in the new `hopcopter_msgs` package, with one `PlannedHop` per hop. It also
+  carries the start's stance (the warm-up landing that launches hop 1) and the model constants.
+  A live test with the map publisher and a fake pose showed it with the marker pair's stamp.
+- **Speed**: `clearance_floor_alpha` now walks the arc without allocating, about 5% faster in
+  both modes.
+
+Offline check: `ros2 run ballistic_motion_planner ballistic_plan_check` (15 cases, ~2 min).
+
+| Check | Result |
+|---|---|
+| `ballistic_parity_test` byte-identical with the flag off | Pass |
+| Every landing ≤ τ_max, the stop included | Pass: at most 17.0° over 14 plans, stops ≤ 16.7°. With the same parameters, the reference search exceeds 20° in 5 of its 12 plans (up to 25.2°), mostly at the stop. |
+| The three expected plans | Pass: identical paths, injections and tilts (low_wall (4,0) ≤ 14.3°, stop 3.9°; low_wall (4,1.5) ≤ 16.6°, stop 4.3°; flat (4,0) ≤ 15.8°). |
+| Chained, unbinned speeds at η 0.71–0.85: 40° guard and push capacity | Pass for all 14 plans. The robot's plans keep α_leg ≥ 46.4° and pushes ≤ 70% of capacity; the reference-config stairs plan reaches 98%. |
+| 13-case matrix | 12 plan. `stairs` (0.6 m risers up to 3.0 m) has no path within 4 J/kg; the reference search finds none either. |
+| Search effort | Stairs, reference configuration: 26,120 expansions against 25,790 (15.1 s against 10.1 s). Robot parameters, against the reference search on the same problem: 1.1–1.8× the expansions on the long goals; up to 6.7× on short ones, where the reference flies one long hop that cannot stop within 20°. |
+| Time per plan | 3.9 s (flat (4,0)) to 7.2 s (tall_stairs); low_wall (4,0) 5.1 s. The estimate above was 3–4.5 s. The reference search takes 1–4 s on the same problems. |
+
+For stage 4:
+- **hopcopter does not read `HopPlan` yet.** Until it does, it flies the new waypoints and
+  target apexes with LJC's own takeoff angle. The plans are now within the push budget and
+  straight (flat (4,0): 1.30 / 1.30 / 1.40 m, where stage 1's run flew a dogleg).
+- **Plans now contain short hops on purpose**: low_wall's final 0.5 m hop, and tall_stairs' two
+  0.10 m hops in place that rebuild speed before a riser. A hop shorter than the landing error
+  can be skipped by the tracker's catch-up, which drops its energy.
+- **The planner still uses g = 9.81** for arcs and flight times. The robot falls at 9.55 level
+  and 9.0–9.3 steered; stage 4 corrects the flight time.
 
 ## Stage 4: fly the published takeoff (problem 4, controller)
 

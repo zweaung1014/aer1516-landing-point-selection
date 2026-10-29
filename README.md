@@ -43,7 +43,7 @@ This project simulates **Hopcopter** — a Crazyflie-based monopedal hopping rob
 ```
 
 **Pipeline:**
-1. **ballistic_planner** — Reads the 2.5D elevation map, listens for `/goal_pose`, and runs a hopping-aware A* search to compute a global path of physically feasible parabolic hops. Publishes a set of waypoints (Marker id=400).
+1. **ballistic_planner** — Reads the 2.5D elevation map, listens for `/goal_pose`, and runs a hopping-aware A* search to compute a global path of physically feasible parabolic hops. Publishes a set of waypoints (Marker id=400) and each hop's takeoff (`hopcopter_msgs/HopPlan`).
 2. **hopcopter** — Controls the hopping robot's attitude to follow the waypoints.
 
 ---
@@ -135,7 +135,11 @@ ros2 run elevation_map_publisher elevation_map_publisher_node
 ### Terminal 6 — Ballistic Motion Planner
 
 Plans once per `/goal_pose` and publishes the waypoints on
-`/ballistic_trajectory` (Marker id=400, per-waypoint z = terrain + 0.8):
+`/ballistic_trajectory` (Marker id=400; per-waypoint z = the target apex of the
+hop that lands there) and each hop's takeoff on `/ballistic_hop_plan`
+(`hopcopter_msgs/HopPlan`). By default it plans for the real robot: a vertical
+push of at most 4 J/kg per hop and no landing tilted more than 20°
+(`search.momentum_aware`; see `CHANGELOG.md`):
 
 ```bash
 ros2 run ballistic_motion_planner ballistic_planner_node
@@ -174,3 +178,14 @@ ros2 run ballistic_motion_planner ballistic_parity_test
 Compare with the Python side (`cd ~/CrazySim/hopcopter-ballistic-planning &&
 python main.py low_wall`): waypoints, per-hop physics, and search counters
 should match.
+
+### Offline Plan Check
+
+Plans 15 cases with the node's defaults and checks every landing's tilt, the
+plans `docs/follow_planner_plan.md` expects, and that the controller could fly
+each hop with real speeds (leg angle and push capacity, η 0.71–0.85). About two
+minutes; exits 1 on a failure:
+
+```bash
+ros2 run ballistic_motion_planner ballistic_plan_check
+```

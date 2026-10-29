@@ -20,6 +20,7 @@ find_package(grid_map_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(hopcopter_msgs REQUIRED)
 
 # Pure C++ planner core — no ROS dependencies, testable standalone.
 # NOTE: never add -ffast-math; speed binning relies on the default FP
@@ -36,12 +37,16 @@ add_executable(ballistic_planner_node src/ballistic_planner_node.cpp)
 target_link_libraries(ballistic_planner_node ballistic_core)
 ament_target_dependencies(ballistic_planner_node
   rclcpp grid_map_core grid_map_ros grid_map_msgs visualization_msgs geometry_msgs
-  ament_index_cpp)
+  ament_index_cpp hopcopter_msgs)
 
 add_executable(ballistic_parity_test src/parity_main.cpp)
 target_link_libraries(ballistic_parity_test ballistic_core)
 
-install(TARGETS ballistic_planner_node ballistic_parity_test
+# Offline check of the momentum_aware planner (stage 3 of docs/follow_planner_plan.md).
+add_executable(ballistic_plan_check src/plan_check_main.cpp)
+target_link_libraries(ballistic_plan_check ballistic_core)
+
+install(TARGETS ballistic_planner_node ballistic_parity_test ballistic_plan_check
   DESTINATION lib/${PROJECT_NAME})
 
 # Renders the node's per-plan JSON snapshot to a PNG (launched by the node).

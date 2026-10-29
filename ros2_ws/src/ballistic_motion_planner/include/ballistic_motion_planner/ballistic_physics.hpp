@@ -85,4 +85,64 @@ std::optional<double> clearance_floor_alpha(
   const Map2D5 & map, const std::vector<double> & inflated,
   double gate, double max_step);
 
+// ---------------------------------------------------------------------------
+// The hop the robot flies (stage 3 of docs/follow_planner_plan.md). Not in the
+// reference planner; the search uses these only when momentum_aware is set.
+// ---------------------------------------------------------------------------
+
+struct Vec3
+{
+  double x, y, z;
+};
+
+// Vertical-push model. The robot pushes level after liftoff, so the leg alone
+// supplies the horizontal speed: it launches at alpha_leg with
+// v_leg = sqrt(eta) v_g_in, and the push acts as an instant vertical kick. The
+// arc, apex, landing angle and injection come out as in feasible_alpha_interval
+// (the same parabola, and e = m/2 (v_s^2 - v_leg^2) is the same number), so
+// gates E1/E2/E3/(4)/(2) are unchanged. Only the takeoff cone (1) moves from the
+// arc angle to alpha_leg = acos(v_h / v_leg), which bounds tan(alpha) in
+// closed form:
+//   v_h <= v_leg cos(lo)  <=>  tan(alpha) >= Z/X + g X / (2 v_leg^2 cos^2 lo)
+// and likewise a ceiling from hi. lo is the higher of the cone's lower edge and
+// alpha_leg_min (the controller's margin); hi is the cone's upper edge, capped
+// at vertical. v_s_min is v_leg.
+std::optional<Interval> feasible_alpha_interval_vertical_push(
+  double X, double Z, double V_max, double g,
+  double mu,
+  const Normal & n_s, const Normal & n_g,
+  double theta,
+  double v_s_min, double e_inject_max, double mass,
+  double min_apex, double V_g_max, double alpha_leg_min);
+
+// The push stage 2 measured (PWM 30000, cut off at the target apex, capped at
+// t_max): its injection above the idle coast fits a level push at accel for
+// the push time plus t_offset, against g, from the leg's vertical speed.
+struct PushModel
+{
+  double accel = 7.55;       // m/s^2, effective specific thrust (motor model 7.98)
+  double g_coast = 9.55;     // m/s^2, effective gravity of the idle coast
+  double t_offset = -0.001;  // s, spin-up and spin-down, added to the push time
+  double t_max = 0.4;        // s, the controller's cap on one push
+};
+
+// Most injection [J/kg] one push adds from leg vertical speed v_z0: it runs to
+// the cap or to the apex, whichever comes first.
+double push_capacity(double v_z0, const PushModel & push, double g);
+
+// Hopcopter's stance model (JumpLib JumpingModel3D.fcn1 with
+// InPlaneJumpingModel(k1, k2)). The stance turns the velocity from -v_in to the
+// takeoff direction d_out, an angle theta_v, and the body z axis at touchdown
+// sits theta_v / k2 of the way from -v_in toward d_out. k1 sets only the
+// liftoff attitude, which the planner does not use.
+struct Stance
+{
+  Vec3 axis;       // body z axis at touchdown, world frame (unit)
+  double tilt;     // angle of axis from vertical, rad
+  double theta_v;  // redirection angle, rad
+};
+
+// v_in: arrival velocity (any length); d_out: takeoff direction (unit).
+Stance stance(const Vec3 & v_in, const Vec3 & d_out, double k2);
+
 }  // namespace ballistic

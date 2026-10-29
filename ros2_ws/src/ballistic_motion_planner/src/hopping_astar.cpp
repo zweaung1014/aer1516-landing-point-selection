@@ -5,8 +5,8 @@
 #include <cmath>
 #include <limits>
 #include <queue>
-#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -20,6 +20,8 @@ namespace
 constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr int kBinBits = 6;   // speed bins fit in 6 bits (v_g <= V_max ~ 7.35,
 constexpr int kBinMax = 63;   // bin <= 30 at speed_bin = 0.25)
+constexpr int kMaxBankBins = 8;
+constexpr uint64_t kStop = ~0ull;  // momentum_aware: the terminal state, stopped at the goal
 }
 
 void validate_params(const PlannerParams & p)
@@ -42,20 +44,15 @@ void validate_params(const PlannerParams & p)
       "the binding standability limit (plan() returns nothing on graded maps)");
   }
 
-  // First-hop derived values (the one deterministic case checkable up front).
-  const double v_s_min_1 = std::sqrt(2.0 * p.g * p.h_initial);  // sqrt(eta)*v_g_initial
+  if (p.bank_bins < 0 || p.bank_bins > kMaxBankBins) {
+    fail("bank_bins must be in [0, " + std::to_string(kMaxBankBins) + "]");
+  }
+
+  // First-hop derived values.
+  const double v_s_min_1 = std::sqrt(p.eta) * seed_landing_speed(p);
   const double v_s_max_1 = std::sqrt(std::min(
       v_s_min_1 * v_s_min_1 + 2.0 * p.e_inject_max / p.mass, p.V_max * p.V_max));
   const double R1 = v_s_max_1 * v_s_max_1 / p.g;
-
-  // At W = v_s_max_1^2 the target is exactly the max-range (45 deg) radius, so
-  // D is 0 analytically and rounding can push it to ~-1e-13 (e.g. h_initial =
-  // 0.8). Treat tiny negatives as 0 instead of as "unreachable".
-  auto tan_hi = [&](double W) -> std::optional<double> {
-      const double D = W * W - p.g * p.g * R1 * R1;
-      if (D < -1e-9 * W * W) {return std::nullopt;}
-      return (W + std::sqrt(std::max(0.0, D))) / (p.g * R1);
-    };
 
   const double flat_disc = std::pow(p.V_max, 4) - p.g * p.g * R1 * R1;
   if (!(M_PI / 2.0 - std::atan(p.mu) <
@@ -65,27 +62,46 @@ void validate_params(const PlannerParams & p)
       "leg-energy ceiling at the first hop's radius — no flat hop is feasible");
   }
 
-  const auto T_ceil = tan_hi(v_s_max_1 * v_s_max_1);
-  if (!T_ceil) {
-    fail("the start's full-thrust budget cannot reach its own first-hop radius");
-  }
-  const auto t_lo = tan_hi(v_s_min_1 * v_s_min_1);
-  const double T_floor = std::max({
-    t_lo ? *t_lo : 0.0,
-    4.0 * p.min_apex / R1,
-    1.0 / p.mu});
-  if (!(T_floor < *T_ceil)) {
-    std::ostringstream oss;
-    oss << "no takeoff angle survives the first hop: floor "
-        << T_floor << " >= ceiling " << *T_ceil
-        << " (tan) for a flat hop at the first hop's own radius";
-    fail(oss.str());
-  }
-
-  if (!(std::sqrt(2.0 * p.g * p.h_initial / p.eta) <= p.V_g_max)) {
+  if (!(seed_landing_speed(p) <= p.V_g_max)) {
     fail("h_initial implies a seed landing speed above V_g_max — the robot "
       "could not survive its own initial condition");
   }
+
+  // Some first hop must exist: expand the start once, on flat ground, with the
+  // search's own edge test. (The reference checked only the 45 deg hop at the
+  // start's full radius against min_apex, which a realistic injection budget or
+  // the warm-up seed fails although shorter hops exist.)
+  const double half = std::ceil(R1) + 1.0;
+  const Map2D5 flat(2.0 * half, 2.0 * half, 0.1);
+  HoppingAStarPlanner probe(flat, {half, half}, {half, half}, p);
+  if (probe.first_hop_count() == 0) {
+    fail("no first hop: from a flat start at the seeded speed the search accepts no hop");
+  }
+}
+
+PlannerParams robot_params()
+{
+  PlannerParams p;
+  p.momentum_aware = true;
+  p.mass = 0.3609;                    // hopcopter's hop_mass
+  p.eta = 0.77;                       // stage 0, in place (0.71-0.81)
+  p.e_inject_max = 4.0 * p.mass;      // J: about 4 J/kg per hop
+  p.min_clearance_gate = 0.3;         // D3
+  p.w_energy = 0.84 * 0.8 / p.mass;   // m/J: the reference trade-off per kg (0.84 at 0.8 kg)
+  p.h_initial = 0.8;                  // the warm-up apex (hopcopter's desired_rel_z)
+  p.min_apex = 0.7;
+  p.V_g_max = std::sqrt(2.0 * p.g * 2.0);
+  p.V_max = std::sqrt(p.eta * p.V_g_max * p.V_g_max + 2.0 * p.e_inject_max / p.mass);
+  return p;
+}
+
+double seed_landing_speed(const PlannerParams & p)
+{
+  if (p.momentum_aware) {
+    return std::sqrt(2.0 * p.g * p.h_initial);
+  }
+  // The reference: the leg alone sustains an apex of h_initial.
+  return std::sqrt(2.0 * p.g * p.h_initial / p.eta);
 }
 
 HoppingAStarPlanner::HoppingAStarPlanner(
@@ -93,7 +109,7 @@ HoppingAStarPlanner::HoppingAStarPlanner(
   std::pair<double, double> goal, const PlannerParams & params)
 : map_(map), p_(params)
 {
-  v_g_initial_ = std::sqrt(2.0 * p_.g * p_.h_initial / p_.eta);
+  v_g_initial_ = seed_landing_speed(p_);
   standable_ = map_.standable_mask(p_.robot_radius, p_.min_clearance_gate, p_.steep_grade);
   normals_ = map_.surface_normals();
   inflated_ = map_.inflated_field(p_.robot_radius + p_.min_clearance_gate, p_.steep_grade);
@@ -126,10 +142,14 @@ double HoppingAStarPlanner::heuristic(int row, int col) const
 
 std::optional<std::vector<std::pair<double, double>>> HoppingAStarPlanner::plan()
 {
+  if (p_.momentum_aware) {
+    return plan_momentum();
+  }
   n_expansions_ = 0;
   n_edge_checks_ = 0;
   n_edges_accepted_ = 0;
   path_hops_.clear();
+  path_stances_.clear();
 
   const uint64_t start = make_state(
     start_cell_.first, start_cell_.second, speed_bin_index(v_g_initial_));
@@ -189,6 +209,8 @@ std::optional<std::vector<std::pair<double, double>>> HoppingAStarPlanner::plan(
       for (const auto & [r, c] : cells) {
         path.push_back(map_.grid_to_world(r, c));
       }
+      path_cost_ = g_cost.at(current);
+      annotate_path(path);
       return path;
     }
 
@@ -218,20 +240,11 @@ std::optional<std::vector<std::pair<double, double>>> HoppingAStarPlanner::plan(
   return std::nullopt;  // no path found
 }
 
-void HoppingAStarPlanner::generate_hop_neighbors(
-  uint64_t state, std::vector<Neighbor> & out)
+template<typename Visit>
+void HoppingAStarPlanner::for_each_target(
+  int cur_row, int cur_col, double hop_radius, Visit && visit) const
 {
-  out.clear();
-
-  const int cur_row = static_cast<int>(state >> kBinBits) / map_.cols();
-  const int cur_col = static_cast<int>(state >> kBinBits) % map_.cols();
-  const int v_bin = static_cast<int>(state & kBinMax);
-  const double v_g_in = v_bin * p_.speed_bin;
-  const double hop_radius = max_hop_radius(
-    v_g_in, p_.eta, p_.e_inject_max, p_.mass, p_.g, p_.V_max);
-
   const auto [cx, cy] = map_.grid_to_world(cur_row, cur_col);
-  const double current_z = map_.at(cur_row, cur_col);
 
   std::unordered_set<uint64_t> attempted;
   attempted.insert(static_cast<uint64_t>(cur_row) * map_.cols() + cur_col);
@@ -266,12 +279,7 @@ void HoppingAStarPlanner::generate_hop_neighbors(
       const uint64_t cell_key = static_cast<uint64_t>(nb_row) * map_.cols() + nb_col;
       if (!attempted.insert(cell_key).second) {continue;}
 
-      auto edge = validate_and_cost(cur_row, cur_col, current_z, nb_row, nb_col, v_g_in);
-      if (edge) {
-        edge->second.hop_radius = hop_radius;
-        out.push_back({make_state(nb_row, nb_col, speed_bin_index(edge->second.v_g)),
-            edge->first, edge->second});
-      }
+      visit(nb_row, nb_col);
     }
   }
 
@@ -280,14 +288,31 @@ void HoppingAStarPlanner::generate_hop_neighbors(
   const uint64_t goal_key =
     static_cast<uint64_t>(goal_cell_.first) * map_.cols() + goal_cell_.second;
   if (std::hypot(gx - cx, gy - cy) <= hop_radius && attempted.count(goal_key) == 0) {
-    auto edge = validate_and_cost(
-      cur_row, cur_col, current_z, goal_cell_.first, goal_cell_.second, v_g_in);
-    if (edge) {
-      edge->second.hop_radius = hop_radius;
-      out.push_back({make_state(goal_cell_.first, goal_cell_.second,
-          speed_bin_index(edge->second.v_g)), edge->first, edge->second});
-    }
+    visit(goal_cell_.first, goal_cell_.second);
   }
+}
+
+void HoppingAStarPlanner::generate_hop_neighbors(
+  uint64_t state, std::vector<Neighbor> & out)
+{
+  out.clear();
+
+  const int cur_row = static_cast<int>(state >> kBinBits) / map_.cols();
+  const int cur_col = static_cast<int>(state >> kBinBits) % map_.cols();
+  const int v_bin = static_cast<int>(state & kBinMax);
+  const double v_g_in = v_bin * p_.speed_bin;
+  const double hop_radius = max_hop_radius(
+    v_g_in, p_.eta, p_.e_inject_max, p_.mass, p_.g, p_.V_max);
+  const double current_z = map_.at(cur_row, cur_col);
+
+  for_each_target(cur_row, cur_col, hop_radius, [&](int nb_row, int nb_col) {
+      auto edge = validate_and_cost(cur_row, cur_col, current_z, nb_row, nb_col, v_g_in);
+      if (edge) {
+        edge->second.hop_radius = hop_radius;
+        out.push_back({make_state(nb_row, nb_col, speed_bin_index(edge->second.v_g)),
+            edge->first, edge->second});
+      }
+    });
 }
 
 std::optional<std::pair<double, Hop>> HoppingAStarPlanner::validate_and_cost(
@@ -369,6 +394,346 @@ double HoppingAStarPlanner::edge_cost(
   const double e_momentum = std::max(0.0, ke_in - ke_out);
 
   return xy_dist + p_.w_energy * (hop.e_inject + e_momentum);
+}
+
+// ---------------------------------------------------------------------------
+// momentum_aware search (stage 3 of docs/follow_planner_plan.md)
+// ---------------------------------------------------------------------------
+
+size_t HoppingAStarPlanner::first_hop_count()
+{
+  const uint64_t start = make_state(
+    start_cell_.first, start_cell_.second, speed_bin_index(v_g_initial_));
+  std::vector<Neighbor> out;
+  if (p_.momentum_aware) {
+    momentum_neighbors(start, nullptr, out);
+  } else {
+    generate_hop_neighbors(start, out);
+  }
+  return out.size();
+}
+
+std::optional<std::vector<std::pair<double, double>>> HoppingAStarPlanner::plan_momentum()
+{
+  n_expansions_ = 0;
+  n_edge_checks_ = 0;
+  n_edges_accepted_ = 0;
+  n_tilt_rejects_ = 0;
+  n_push_rejects_ = 0;
+  recheck_failed_ = false;
+  path_hops_.clear();
+  path_stances_.clear();
+
+  const uint64_t start = make_state(
+    start_cell_.first, start_cell_.second, speed_bin_index(v_g_initial_));
+
+  struct Entry
+  {
+    double f;
+    uint64_t counter;
+    uint64_t state;
+    bool operator>(const Entry & o) const
+    {
+      if (f != o.f) {return f > o.f;}
+      return counter > o.counter;
+    }
+  };
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open_set;
+  uint64_t counter = 0;
+  open_set.push({0.0, counter, start});
+
+  std::unordered_map<uint64_t, double> g_cost;
+  g_cost[start] = 0.0;
+  // A state's arrival direction is that of the hop in its came_from entry: the
+  // cheapest path's. The start has none (a vertical arrival).
+  std::unordered_map<uint64_t, std::pair<uint64_t, Hop>> came_from;
+
+  const uint64_t goal_cell_key =
+    static_cast<uint64_t>(goal_cell_.first) * map_.cols() + goal_cell_.second;
+
+  std::vector<Neighbor> neighbors;
+  while (!open_set.empty()) {
+    const Entry e = open_set.top();
+    open_set.pop();
+    const uint64_t current = e.state;
+
+    if (current == kStop) {
+      path_cost_ = g_cost.at(kStop);
+      auto path = reconstruct(came_from.at(kStop).first, came_from);
+      // Re-check with the exact arrival directions: a cheaper path found later
+      // can replace a state's arrival after its hops were generated.
+      annotate_path(path);
+      for (const auto & st : path_stances_) {
+        if (st.tilt > p_.tau_max + 1e-9) {
+          recheck_failed_ = true;
+          path_hops_.clear();
+          path_stances_.clear();
+          return std::nullopt;
+        }
+      }
+      return path;
+    }
+
+    const int cur_row = static_cast<int>(current >> kBinBits) / map_.cols();
+    const int cur_col = static_cast<int>(current >> kBinBits) % map_.cols();
+    const double g_cur = g_cost.at(current);
+    if (e.f > g_cur + heuristic(cur_row, cur_col)) {
+      continue;  // stale entry
+    }
+    ++n_expansions_;
+
+    std::optional<Hop> arrival;
+    const auto cf = came_from.find(current);
+    if (cf != came_from.end()) {
+      arrival = cf->second.second;
+    }
+    const Hop * arr = arrival ? &*arrival : nullptr;
+
+    if ((current >> kBinBits) == goal_cell_key) {
+      // Stop here if this landing can take a vertical takeoff within tau_max.
+      const Stance st = stance(
+        arrival_velocity(arr, (current & kBinMax) * p_.speed_bin), {0.0, 0.0, 1.0}, p_.k2);
+      if (st.tilt <= p_.tau_max) {
+        const auto it = g_cost.find(kStop);
+        if (it == g_cost.end() || g_cur < it->second) {
+          g_cost[kStop] = g_cur;
+          came_from[kStop] = {current, Hop{}};
+          ++counter;
+          open_set.push({g_cur, counter, kStop});
+        }
+      }
+    }
+
+    momentum_neighbors(current, arr, neighbors);
+    for (const auto & nb : neighbors) {
+      const double tentative_g = g_cur + nb.edge_cost;
+      const auto nit = g_cost.find(nb.state);
+      if (tentative_g < (nit == g_cost.end() ? kInf : nit->second)) {
+        g_cost[nb.state] = tentative_g;
+        came_from[nb.state] = {current, nb.hop};
+        const int nb_row = static_cast<int>(nb.state >> kBinBits) / map_.cols();
+        const int nb_col = static_cast<int>(nb.state >> kBinBits) % map_.cols();
+        ++counter;
+        open_set.push({tentative_g + heuristic(nb_row, nb_col), counter, nb.state});
+      }
+    }
+  }
+  return std::nullopt;  // no path found
+}
+
+Vec3 HoppingAStarPlanner::arrival_velocity(const Hop * arrival, double v_g_in) const
+{
+  if (!arrival) {
+    return {0.0, 0.0, -v_g_in};  // the start: hopping in place
+  }
+  const double c = std::cos(arrival->beta);
+  return {v_g_in * c * std::cos(arrival->heading), v_g_in * c * std::sin(arrival->heading),
+    -v_g_in * std::sin(arrival->beta)};
+}
+
+std::optional<Interval> HoppingAStarPlanner::momentum_interval(
+  int cur_row, int cur_col, double current_z, int nb_row, int nb_col, double v_g_in)
+{
+  ++n_edge_checks_;
+  const double neighbor_z = map_.at(nb_row, nb_col);
+
+  // (a) Stance gate — also rejects OBSTACLE cells outright.
+  if (!standable_[static_cast<size_t>(nb_row) * map_.cols() + nb_col]) {
+    return std::nullopt;
+  }
+
+  const auto [cx, cy] = map_.grid_to_world(cur_row, cur_col);
+  const auto [nx, ny] = map_.grid_to_world(nb_row, nb_col);
+  const double X = std::hypot(nx - cx, ny - cy);
+  const double Z = neighbor_z - current_z;
+
+  // (b) Energy band + min-apex + BEAM cones (takeoff on the leg angle) +
+  // landing-speed cap.
+  const auto interval = feasible_alpha_interval_vertical_push(
+    X, Z, p_.V_max, p_.g, p_.mu,
+    normals_[static_cast<size_t>(cur_row) * map_.cols() + cur_col],
+    normals_[static_cast<size_t>(nb_row) * map_.cols() + nb_col],
+    std::atan2(ny - cy, nx - cx),
+    std::sqrt(p_.eta) * v_g_in, p_.e_inject_max, p_.mass, p_.min_apex, p_.V_g_max,
+    p_.alpha_leg_min);
+  if (!interval) {
+    return std::nullopt;
+  }
+
+  // (c) Clearance floor.
+  const auto alpha_c = clearance_floor_alpha(
+    cx, cy, current_z, nx, ny, neighbor_z,
+    map_, inflated_, p_.min_clearance_gate, p_.arc_max_step);
+  if (!alpha_c || *alpha_c > interval->second) {
+    return std::nullopt;
+  }
+  ++n_edges_accepted_;
+  return Interval{std::max(interval->first, *alpha_c), interval->second};
+}
+
+void HoppingAStarPlanner::momentum_neighbors(
+  uint64_t state, const Hop * arrival, std::vector<Neighbor> & out)
+{
+  out.clear();
+
+  const int cur_row = static_cast<int>(state >> kBinBits) / map_.cols();
+  const int cur_col = static_cast<int>(state >> kBinBits) % map_.cols();
+  const int v_bin = static_cast<int>(state & kBinMax);
+  const double v_g_in = v_bin * p_.speed_bin;
+  const double v_leg = std::sqrt(p_.eta) * v_g_in;
+  const double hop_radius = max_hop_radius(
+    v_g_in, p_.eta, p_.e_inject_max, p_.mass, p_.g, p_.V_max);
+  const auto [cx, cy] = map_.grid_to_world(cur_row, cur_col);
+  const double current_z = map_.at(cur_row, cur_col);
+  const Vec3 v_in = arrival_velocity(arrival, v_g_in);
+  // A landing on the goal must allow a stop. Taking off vertically tilts the
+  // landing by (1 - 1/k2)(90 deg - beta), so its descent angle beta must be at
+  // least beta_stop.
+  const double beta_stop = 0.5 * M_PI - p_.tau_max / (1.0 - 1.0 / p_.k2);
+
+  for_each_target(cur_row, cur_col, hop_radius, [&](int nb_row, int nb_col) {
+      const auto iv = momentum_interval(cur_row, cur_col, current_z, nb_row, nb_col, v_g_in);
+      if (!iv) {
+        return;
+      }
+      const auto [nx, ny] = map_.grid_to_world(nb_row, nb_col);
+      const double X = std::hypot(nx - cx, ny - cy);
+      const double Z = map_.at(nb_row, nb_col) - current_z;
+      double alpha_floor = iv->first;
+      const double alpha_max = iv->second;
+      if (nb_row == goal_cell_.first && nb_col == goal_cell_.second && beta_stop > 0.0) {
+        // The landing's descent angle: tan(beta) = tan(alpha) - 2Z/X.
+        alpha_floor = std::max(alpha_floor, std::atan(std::tan(beta_stop) + 2.0 * Z / X));
+        if (alpha_floor > alpha_max) {
+          ++n_tilt_rejects_;
+          return;
+        }
+      }
+
+      // The least-injection angle, and bank_bins steeper ones that each land one
+      // speed bin faster: spending more on a short hop can carry the energy a
+      // later hop needs, where the least-injection angle alone would burn it
+      // with a sideways hop.
+      double alphas[1 + kMaxBankBins];
+      int n_alphas = 0;
+      const double a0 = std::min(std::max(std::atan(min_energy_tan(X, Z)), alpha_floor), alpha_max);
+      alphas[n_alphas++] = a0;
+      const int b0 = speed_bin_index(landing_speed(takeoff_speed(X, Z, a0, p_.g), Z, p_.g));
+      for (int k = 1; k <= p_.bank_bins; ++k) {
+        // Just inside bin b0 + k, on the steep root.
+        const double v_g = (b0 + k - 0.5) * p_.speed_bin + 1e-9;
+        const auto iv_b = speed_tan_interval(X, Z, v_g * v_g + 2.0 * p_.g * Z, p_.g);
+        if (!iv_b) {
+          continue;
+        }
+        const double a = std::atan(iv_b->second);
+        if (a > a0 && a <= alpha_max) {
+          alphas[n_alphas++] = a;
+        }
+      }
+
+      const double ux = (nx - cx) / X;
+      const double uy = (ny - cy) / X;
+      for (int i = 0; i < n_alphas; ++i) {
+        const double a = alphas[i];
+        const double v_h = xdot(X, Z, a, p_.g);
+        if (!(v_h <= v_leg)) {
+          continue;  // outside the interval's leg-angle bound by rounding
+        }
+        const double c = v_h / v_leg;
+        const double s = std::sqrt(1.0 - c * c);
+        const Stance st = stance(v_in, {c * ux, c * uy, s}, p_.k2);
+        if (st.tilt > p_.tau_max) {
+          ++n_tilt_rejects_;
+          continue;
+        }
+        // One push must make up the planned apex for any arrival speed in this
+        // speed bin, so check it at the bin's bottom: the arc's v_h, from less leg.
+        const double v_s = takeoff_speed(X, Z, a, p_.g);
+        const double v_z_arc2 = v_s * v_s - v_h * v_h;
+        const double v_leg_lo = std::sqrt(p_.eta) * (v_g_in - 0.5 * p_.speed_bin);
+        const double v_z0_lo2 = v_leg_lo * v_leg_lo - v_h * v_h;
+        if (v_z0_lo2 <= 0.0 ||
+          0.5 * (v_z_arc2 - v_z0_lo2) > push_capacity(std::sqrt(v_z0_lo2), p_.push, p_.g))
+        {
+          ++n_push_rejects_;
+          continue;
+        }
+
+        Hop hop;
+        hop.alpha_s = a;
+        hop.v_s = v_s;
+        hop.v_g = landing_speed(v_s, Z, p_.g);
+        hop.v_g_in = v_g_in;
+        hop.e_inject = injection_energy(v_s, v_leg, p_.mass);
+        const double T = std::tan(a);
+        hop.apex_drop = (X * T - 2.0 * Z) * (X * T - 2.0 * Z) / (4.0 * (X * T - Z));
+        hop.X = X;
+        hop.Z = Z;
+        hop.hop_radius = hop_radius;
+        hop.heading = std::atan2(ny - cy, nx - cx);
+        hop.alpha_leg = std::atan2(s, c);
+        hop.v_leg = v_leg;
+        hop.v_h = v_h;
+        hop.beta = std::atan2(std::sqrt(std::max(0.0, hop.v_g * hop.v_g - v_h * v_h)), v_h);
+        out.push_back({make_state(nb_row, nb_col, speed_bin_index(hop.v_g)),
+            edge_cost(cur_row, cur_col, nb_row, nb_col, hop), hop});
+      }
+    });
+}
+
+std::vector<std::pair<double, double>> HoppingAStarPlanner::reconstruct(
+  uint64_t state,
+  const std::unordered_map<uint64_t, std::pair<uint64_t, Hop>> & came_from)
+{
+  std::vector<std::pair<int, int>> cells;
+  std::vector<Hop> hops;
+  uint64_t s = state;
+  while (true) {
+    cells.emplace_back(
+      static_cast<int>(s >> kBinBits) / map_.cols(),
+      static_cast<int>(s >> kBinBits) % map_.cols());
+    const auto it = came_from.find(s);
+    if (it == came_from.end()) {break;}
+    hops.push_back(it->second.second);
+    s = it->second.first;
+  }
+  std::reverse(cells.begin(), cells.end());
+  std::reverse(hops.begin(), hops.end());
+  path_hops_ = std::move(hops);
+
+  std::vector<std::pair<double, double>> path;
+  path.reserve(cells.size());
+  for (const auto & [r, c] : cells) {
+    path.push_back(map_.grid_to_world(r, c));
+  }
+  return path;
+}
+
+void HoppingAStarPlanner::annotate_path(const std::vector<std::pair<double, double>> & path)
+{
+  if (!p_.momentum_aware) {
+    // The reference model's leg launches along the arc.
+    for (size_t i = 0; i < path_hops_.size(); ++i) {
+      Hop & h = path_hops_[i];
+      h.heading = std::atan2(
+        path[i + 1].second - path[i].second, path[i + 1].first - path[i].first);
+      h.alpha_leg = h.alpha_s;
+      h.v_leg = h.v_s;
+      h.v_h = xdot(h.X, h.Z, h.alpha_s, p_.g);
+      h.beta = std::atan2(std::sqrt(std::max(0.0, h.v_g * h.v_g - h.v_h * h.v_h)), h.v_h);
+    }
+  }
+  path_stances_.clear();
+  Vec3 v_in{0.0, 0.0, -1.0};  // the start: hopping in place
+  for (const auto & h : path_hops_) {
+    const double c = std::cos(h.alpha_leg);
+    path_stances_.push_back(stance(
+        v_in, {c * std::cos(h.heading), c * std::sin(h.heading), std::sin(h.alpha_leg)}, p_.k2));
+    const double v_z = std::sqrt(std::max(0.0, h.v_g * h.v_g - h.v_h * h.v_h));
+    v_in = {h.v_h * std::cos(h.heading), h.v_h * std::sin(h.heading), -v_z};
+  }
+  path_stances_.push_back(stance(v_in, {0.0, 0.0, 1.0}, p_.k2));  // the stop at the goal
 }
 
 }  // namespace ballistic

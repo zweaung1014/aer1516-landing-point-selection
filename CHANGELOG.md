@@ -3,6 +3,60 @@
 ## [Unreleased]
 
 ### Added
+- **Momentum-aware planner mode** (stage 3 of `docs/follow_planner_plan.md`;
+  `search.momentum_aware`, on by default). The reference A* plans hops the robot cannot fly: it
+  pushes along the takeoff angle, lets the leg alone sustain the start's apex, never checks how
+  far a landing must tilt to redirect the robot into its next hop, and flies every hop at its
+  least-injection angle. With the flag:
+  - **Vertical push.** The robot pushes level after liftoff, so the leg alone supplies the
+    horizontal speed. The arc, apex and injection are unchanged; the takeoff friction cone now
+    applies to the leg angle α_leg = acos(v_h / v_leg), one closed-form bound on tan α. Hops
+    keep α_leg ≥ 42° (`stance.min_leg_angle_deg`), so the controller's 40° guard has room for
+    speed binning (±1.5–2°).
+  - **Push capacity.** A hop may not inject more than one 30000 push delivers within 0.4 s from
+    the leg's vertical speed: stage 2's fit, `push.accel` 7.55 m/s², `push.g_coast` 9.55,
+    `push.time_offset` −1 ms, `push.max_time` 0.4 s. It is checked at the bottom of the
+    arrival's speed bin; checked at the bin's centre, a hop at 99% of capacity failed with real
+    speeds.
+  - **Landing tilt.** Every landing must redirect the robot into its next hop within 20°
+    (`stance.max_tilt_deg`, D4) under hopcopter's stance model (fcn1 with `stance.k2` 2.469; k1
+    sets only the liftoff attitude, which the planner does not use). The start counts as a
+    vertical arrival. The goal must allow a stop: a descent angle of at least 56.4°. Each A*
+    state keeps its cheapest path's arrival direction; the key stays (cell, speed bin). The
+    returned path is re-checked with its exact arrival directions, and a failure is reported as
+    no path.
+  - **Banking.** Besides the least-injection angle, each hop also tries 4 steeper angles
+    (`search.bank_bins`), each landing one speed bin faster. This departs from the reference
+    planner's rule: spending a little more on one hop can carry the energy a later hop needs,
+    which the reference burned with sideways hops (the 93° detour).
+  - **Seed.** The start's arrival speed is the landing from the warm-up apex, √(2g·h_initial) =
+    3.96 m/s, binned to 4.0. It was √(2g·h_initial/η) = 4.5 m/s, which assumed the leg alone
+    sustains that apex; in fact the push does (40–75 ms at 30000).
+  - η stays one constant (0.77) until stage 4 measures whether it depends on the redirection.
+
+  Off, the search is the reference port, unchanged: `ballistic_parity_test` output is
+  byte-identical.
+- **`hopcopter_msgs` package, `HopPlan` on `/ballistic_hop_plan`** (D5). Per hop: the landing
+  (xy and ground z), heading, α_leg, v_leg, v_h, target apex, injection per kg, the expected
+  arrival velocity, and the landing axis and tilt that redirect the robot into the next hop (or
+  stop it at the goal). Per plan: the arrival speed and stance assumed at the start, and the
+  model constants (g, η, k2, `momentum_aware`). It is published just before the marker pair,
+  and all three share one stamp. The id=400 marker is unchanged; hopcopter does not read
+  `HopPlan` yet (stage 4).
+- **`ballistic_plan_check`** (offline, no ROS graph):
+  `ros2 run ballistic_motion_planner ballistic_plan_check`. It plans 15 cases with the node's
+  defaults: the plan doc's three expected plans, the rest of the 13-case matrix, and stairs on
+  the reference configuration. For each it checks:
+  - every landing's tilt, the stop included;
+  - the expected plans;
+  - with chained, unbinned speeds for η 0.71–0.85, the controller's 40° leg-angle guard and the
+    push capacity.
+
+  It also reports search effort against the reference search, and exits 1 if a check fails.
+- **Planner output**: `ballistic_hops_*.csv` gains `heading_deg`, `alpha_leg_deg`, `v_leg`,
+  `v_h`, `e_inject_per_kg`, `launch_tilt_deg` and `land_tilt_deg` after its existing columns.
+  The logged hop table gains the leg angle, J/kg and tilt, plus the stop's tilt. Snapshots carry
+  the same per hop, and the PNG's side views show the leg angle and landing tilt.
 - **Stage 2 reports in `calibrate_hops.py`**: the lead each push cutoff implies (and the
   `t_lead` it calls for), apex error per target, 3 → 2 transitions during a push, injection
   available within the 0.4 s cap against liftoff vertical speed (fitted to every push), and the
@@ -45,6 +99,30 @@
   `ballistic_path_*.csv` z now matches the published marker z.
 
 ### Changed
+- **The planner node's defaults are the real robot** (stage 3; this and the next two entries).
+  `search.momentum_aware` true, and:
+  - `physics.mass` 0.8 → 0.3609 kg (hopcopter's `hop_mass`);
+  - `physics.eta` 0.7 → 0.77 (stage 0, in place);
+  - `physics.e_inject_max` 7.85 J (9.8 J/kg) → 4 J/kg × mass = 1.44 J. One push at 30000
+    delivers 3–7 J/kg (stage 2), and the plans need ~4;
+  - `robot.min_clearance` 0.5 → 0.3 m (D3): low_wall plans become three straight hops within
+    the budget;
+  - `search.w_energy` 0.84 → 1.862 m/J, i.e. 0.84 × 0.8/0.3609, which keeps the reference
+    trade-off per kg.
+
+  The defaults live in `ballistic::robot_params()`; `PlannerParams` keeps the reference
+  defaults, which `ballistic_parity_test` uses. low_wall (4,0) now plans (0.05,0.05) →
+  (1.65,0.05) → (3.55,0.05) → (4.05,0.05) at 3.4 / 3.8 / 2.0 J/kg with landing tilts ≤ 14.3°,
+  as the plan doc predicted. The reference search planned (4,0) with a 29.7° WP1 landing at the
+  old defaults. Plans take 4–7 s, against 1–4 s for the reference search on the same
+  parameters.
+- **`validate_params`' first-hop check is now "some first hop exists"**: it expands the start
+  once, on flat ground, with the search's own edge test. It used to check only the 45° hop at
+  the start's full radius, which threw at node startup for any budget under 5.9 J/kg, and with
+  the new seed, although shorter hops existed. `search.bank_bins` must be 0–8.
+- **`clearance_floor_alpha` walks the arc in one pass** instead of building `arc_samples`'
+  vectors: the same samples and arithmetic, without three allocations per candidate edge (about
+  5% faster). `ballistic_parity_test` output is byte-identical.
 - **The push is cut off at the target apex, closed-loop** (stage 2 of
   `docs/follow_planner_plan.md`; this and the next five entries). JHC guessed a push duration at
   the apex from a one-hop-old energy estimate. It compared a vertical target with a total-energy

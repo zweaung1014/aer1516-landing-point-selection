@@ -166,6 +166,114 @@ std::optional<Interval> feasible_alpha_interval(
   return Interval{alpha_min, alpha_max};
 }
 
+std::optional<Interval> feasible_alpha_interval_vertical_push(
+  double X, double Z, double V_max, double g,
+  double mu,
+  const Normal & n_s, const Normal & n_g,
+  double theta,
+  double v_s_min, double e_inject_max, double mass,
+  double min_apex, double V_g_max, double alpha_leg_min)
+{
+  if (X < 1e-9 || v_s_min <= 0.0) {
+    return std::nullopt;  // degenerate, or no leg speed to hop with
+  }
+
+  // (E1) (E2) (E3) (4): as in feasible_alpha_interval.
+  const double W_lo = v_s_min * v_s_min;
+  const double W_hi = std::min(W_lo + 2.0 * e_inject_max / mass, V_max * V_max);
+  const auto iv_hi = speed_tan_interval(X, Z, W_hi, g);
+  if (!iv_hi) {
+    return std::nullopt;
+  }
+  const auto iv_lo = speed_tan_interval(X, Z, W_lo, g);
+  double alpha_lo = std::atan(iv_lo ? iv_lo->second : iv_hi->first);
+  double alpha_hi = std::atan(iv_hi->second);
+  const auto T_apex = min_apex_tan(X, Z, min_apex);
+  if (T_apex) {
+    alpha_lo = std::max(alpha_lo, std::atan(*T_apex));
+  }
+  const auto tan_iv = speed_tan_interval(X, Z, V_g_max * V_g_max + 2.0 * g * Z, g);
+  if (!tan_iv) {
+    return std::nullopt;
+  }
+  alpha_lo = std::max(alpha_lo, std::atan(tan_iv->first));
+  alpha_hi = std::min(alpha_hi, std::atan(tan_iv->second));
+
+  // (1) takeoff non-sliding, on the leg angle: a floor (and a ceiling) on tan(alpha).
+  const auto cone_s = inplane_friction_cone(n_s, theta, mu);
+  if (!cone_s) {
+    return std::nullopt;
+  }
+  const double lo_leg = std::max({cone_s->first - cone_s->second, alpha_leg_min, 0.0});
+  const double hi_leg = std::min(cone_s->first + cone_s->second, 0.5 * M_PI);
+  if (lo_leg >= hi_leg) {
+    return std::nullopt;
+  }
+  const double c_lo = std::cos(lo_leg);
+  alpha_lo = std::max(alpha_lo, std::atan(Z / X + g * X / (2.0 * W_lo * c_lo * c_lo)));
+  const double c_hi = std::cos(hi_leg);
+  if (c_hi > 1e-9) {
+    alpha_hi = std::min(alpha_hi, std::atan(Z / X + g * X / (2.0 * W_lo * c_hi * c_hi)));
+  }
+
+  // (2) landing non-sliding: the same arc, so unchanged.
+  const auto cone_g = inplane_friction_cone(n_g, theta, mu);
+  if (!cone_g) {
+    return std::nullopt;
+  }
+  const auto land_iv = landing_cone_alpha_s(X, Z, cone_g->first, cone_g->second);
+  if (!land_iv) {
+    return std::nullopt;
+  }
+  alpha_lo = std::max(alpha_lo, land_iv->first);
+  alpha_hi = std::min(alpha_hi, land_iv->second);
+
+  const double alpha_min = alpha_lo + kAlphaEps;
+  const double alpha_max = alpha_hi - kAlphaEps;
+  if (alpha_min >= alpha_max) {
+    return std::nullopt;
+  }
+  return Interval{alpha_min, alpha_max};
+}
+
+double push_capacity(double v_z0, const PushModel & push, double g)
+{
+  if (v_z0 <= 0.0) {
+    return 0.0;
+  }
+  const double decel = g - push.accel;  // net, while pushing
+  double t = push.t_max + push.t_offset;
+  if (decel > 0.0) {
+    t = std::min(t, v_z0 / decel);  // it cannot push past the apex
+  }
+  // the push's extra acceleration over the idle coast, times the height it is applied over
+  return (push.accel - (g - push.g_coast)) * (v_z0 * t - 0.5 * decel * t * t);
+}
+
+Stance stance(const Vec3 & v_in, const Vec3 & d_out, double k2)
+{
+  const double n = std::sqrt(v_in.x * v_in.x + v_in.y * v_in.y + v_in.z * v_in.z);
+  const Vec3 a{-v_in.x / n, -v_in.y / n, -v_in.z / n};
+  const Vec3 c{
+    a.y * d_out.z - a.z * d_out.y,
+    a.z * d_out.x - a.x * d_out.z,
+    a.x * d_out.y - a.y * d_out.x};
+  const double s = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);  // sin(theta_v)
+  Stance out;
+  out.theta_v = std::atan2(s, a.x * d_out.x + a.y * d_out.y + a.z * d_out.z);
+  if (s < 1e-9) {
+    out.axis = a;  // takeoff straight back up the arrival: nothing to turn
+  } else {
+    // a rotated toward d_out by theta_v / k2, in the plane of the two
+    const double theta_l = out.theta_v / k2;
+    const double wa = std::sin(out.theta_v - theta_l) / s;
+    const double wb = std::sin(theta_l) / s;
+    out.axis = {wa * a.x + wb * d_out.x, wa * a.y + wb * d_out.y, wa * a.z + wb * d_out.z};
+  }
+  out.tilt = std::acos(std::min(1.0, std::max(-1.0, out.axis.z)));
+  return out;
+}
+
 std::optional<ArcSamples> arc_samples(
   double x_s, double y_s, double t_s,
   double x_g, double y_g, double t_g,
@@ -219,23 +327,44 @@ std::optional<double> clearance_floor_alpha(
   const Map2D5 & map, const std::vector<double> & inflated,
   double gate, double max_step)
 {
-  const auto sampled = arc_samples(x_s, y_s, t_s, x_g, y_g, t_g, map, inflated, max_step);
-  if (!sampled) {
+  // arc_samples' walk, with the same arithmetic, but without storing the
+  // samples: this runs for every candidate edge, millions of times per plan.
+  const double dx = x_g - x_s;
+  const double dy = y_g - y_s;
+  const double X = std::hypot(dx, dy);
+  if (X < 1e-9) {
     return std::nullopt;
   }
-  if (!sampled->any_active) {
-    return -std::numeric_limits<double>::infinity();
-  }
 
-  const double X = sampled->X;
+  const double step = std::min(max_step, map.resolution() / 3.0);
+  const int n = std::max(3, static_cast<int>(std::ceil(X / step)) + 1);
+  const double t_max = std::max(t_s, t_g);
+  const double res = map.resolution();
   const double Z = t_g - t_s;
+  bool any_active = false;
   double max_T = -std::numeric_limits<double>::infinity();
-  for (size_t i = 0; i < sampled->u.size(); ++i) {
-    if (!sampled->active[i]) {continue;}
-    const double ua = sampled->u[i];
-    const double numer = sampled->field[i] + gate - t_s - Z * (ua * ua) / (X * X);
-    const double denom = ua * (X - ua) / X;
-    max_T = std::max(max_T, numer / denom);
+  for (int i = 0; i < n; ++i) {
+    const double u = X * i / (n - 1);
+    const double cx = x_s + u * (dx / X);
+    const double cy = y_s + u * (dy / X);
+    if (!map.is_within_bounds(cx, cy)) {
+      return std::nullopt;  // centreline leaves the map
+    }
+    int ci = static_cast<int>(std::trunc((cx - map.origin_x()) / res));
+    int ri = static_cast<int>(std::trunc((cy - map.origin_y()) / res));
+    ci = std::max(0, std::min(ci, map.cols() - 1));
+    ri = std::max(0, std::min(ri, map.rows() - 1));
+    const double field = inflated[static_cast<size_t>(ri) * map.cols() + ci];
+    // Only terrain above BOTH endpoints can reject the hop.
+    if (i != 0 && i != n - 1 && field > t_max) {
+      any_active = true;
+      const double numer = field + gate - t_s - Z * (u * u) / (X * X);
+      const double denom = u * (X - u) / X;
+      max_T = std::max(max_T, numer / denom);
+    }
+  }
+  if (!any_active) {
+    return -std::numeric_limits<double>::infinity();
   }
   return std::atan(max_T);
 }

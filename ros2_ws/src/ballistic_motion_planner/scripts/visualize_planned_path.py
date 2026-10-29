@@ -227,8 +227,12 @@ def draw_hop_side_view(ax, i, hop, s, z_top):
 
     verdict = "REJECT" if rejected else "ACCEPT"
     clear = "∞ (unconstrained)" if min_c is None else f"{min_c:+.3f} m"
-    ax.set_title(f"hop {i + 1}: X={X:.2f} m, Z={Z:+.2f} m\n"
-                 f"{verdict}   {clear}   α = {np.degrees(alpha):.1f}°", fontsize=9)
+    title = (f"hop {i + 1}: X={X:.2f} m, Z={Z:+.2f} m\n"
+             f"{verdict}   {clear}   α = {np.degrees(alpha):.1f}°")
+    if "alpha_leg" in hop:  # snapshots since stage 3: the leg angle, and the tilt it lands at
+        title += (f"\nleg {np.degrees(hop['alpha_leg']):.1f}°, "
+                  f"landing tilt {np.degrees(hop['land_tilt']):.1f}°")
+    ax.set_title(title, fontsize=9)
     ax.set_xlabel("u (m along hop)")
     ax.set_xlim(0, X)
     ax.grid(alpha=0.25)

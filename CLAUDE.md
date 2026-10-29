@@ -37,6 +37,7 @@ under `crazyflie-firmware/tools/crazyflie-simulation/`). The project's own code 
 | Path | What it is |
 |---|---|
 | `ros2_ws/src/ballistic_motion_planner/` | C++ hopping-aware A* planner (`ballistic_planner_node`) |
+| `ros2_ws/src/hopcopter_msgs/` | `HopPlan` / `PlannedHop` messages: each planned hop's takeoff |
 | `ros2_ws/src/elevation_map_publisher/` | C++ publisher of the known 2.5D `/elevation_map` (`elevation_map_publisher_node`) |
 | `ros2_ws/src/hopping_robot/` | Python hop controller (`hopcopter`) + `JumpLib`/`RisLib` |
 | `ros2_ws/src/nlp_goal_interface/` | Python Claude-powered goal parser (`nlp_goal_node`) |
@@ -51,7 +52,7 @@ under `crazyflie-firmware/tools/crazyflie-simulation/`). The project's own code 
 cd ~/CrazySim/ros2_ws
 source /opt/ros/humble/setup.bash
 colcon build                                          # full workspace
-colcon build --packages-select ballistic_motion_planner   # one package (C++ changes; builds Release by default)
+colcon build --packages-up-to ballistic_motion_planner   # the planner and hopcopter_msgs (builds Release by default)
 source install/setup.bash                             # required in EVERY terminal
 ```
 
@@ -69,8 +70,13 @@ There is **no test suite for the simulation**. The `test/` directories in the Py
 contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
 `test_waypoint_tracker.py` and `test_push_controller.py`. Run them with
 `cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py`.
-They cover waypoint decisions, the braking tilt guard and the push cutoff. Everything else is verified by running
-the sim and inspecting the CSVs it writes (below).
+They cover waypoint decisions, the braking tilt guard and the push cutoff. The planner has two
+offline executables (no ROS graph): `ros2 run ballistic_motion_planner ballistic_parity_test`
+(the reference search against the Python port; its output must stay byte-identical) and
+`ballistic_plan_check` (the momentum-aware search on 15 cases: landing tilts, the expected plans,
+and the controller's leg-angle guard and push capacity with real speeds for η 0.71–0.85; ~2 min,
+exits 1 on a failure). Everything else is verified by running the sim and inspecting the CSVs it
+writes (below).
 
 ### Analysis scripts (run from the repo root, not the workspace)
 
@@ -108,8 +114,20 @@ no replan timer. The path travels as a `Marker` SPHERE_LIST (id=400) on `/ballis
 planning time on `/trajectory_start_position`. Per-waypoint z is the **`target_apex`** of the
 hop that lands on that waypoint — the planned apex height above that hop's takeoff ground
 (`apex_drop + Z`) — and `output.hover_offset` (0.8 m) for the start point, which no hop lands
-on. It is a relative height, not a world z. The node works entirely in the world frame and does
-not use TF or the LiDAR. Each plan also writes `snapshot_<stamp>.json` to
+on. It is a relative height, not a world z. Just before the marker pair, with the same stamp,
+it publishes `hopcopter_msgs/HopPlan` on `/ballistic_hop_plan`: each hop's heading, leg angle
+α_leg, v_h, target apex and injection, its expected arrival velocity, and the landing attitude
+and tilt that redirect the robot into the next hop (hopcopter does not read it yet; stage 4 of
+`docs/follow_planner_plan.md`). The node works entirely in the world frame and does not use TF
+or the LiDAR.
+
+By default (`search.momentum_aware`, with the robot's parameters from
+`ballistic::robot_params()`) the search models the robot that flies the plan: a vertical push,
+so the leg alone supplies v_h and hops keep α_leg ≥ 42°; at most 4 J/kg and one 30000 push per
+hop; a 20° cap on every landing's tilt under hopcopter's stance model (k2 2.469), with the start
+a vertical arrival and a stop required at the goal; and 4 "banking" angles per hop besides the
+least-injection one. Off, it is the reference port, unchanged. `PlannerParams`' own defaults
+are the reference planner's, which `ballistic_parity_test` uses; the node's are the robot's. Each plan also writes `snapshot_<stamp>.json` to
 `data/data_ballistic_planner/vis_planned_path/`. The node then starts
 `scripts/visualize_planned_path.py` in the background, which renders `planned_path_<stamp>.png`
 with the same layout as the reference `main.py`, plus a side view of each hop (arc, inflated
@@ -188,6 +206,10 @@ and controller work in the world frame) but is kept for RViz and legacy consumer
   touching it.
 - **`CHANGELOG.md` records why parameters have their values.** Consult it before retuning the
   ballistic planner or the hop controller; several defaults look arbitrary and are not.
+- **Two parameter sets in the planner.** The node's defaults (`robot_params()`: mass 0.3609,
+  η 0.77, 4 J/kg, min_clearance 0.3, momentum-aware) are not `PlannerParams`' defaults (the
+  reference planner's, for `ballistic_parity_test`). Change a node default in `robot_params()`,
+  and keep the parity test's configuration as it is.
 - **The SITL firmware and Gazebo plugin are built binaries.** `cf2` and
   `libgz_crazysim_plugin.so` live in `crazyflie-firmware/sitl_make/build` (gitignored); after
   changing firmware or plugin source, run `make -C crazyflie-firmware/sitl_make/build`. In

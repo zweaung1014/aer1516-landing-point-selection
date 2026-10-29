@@ -3,7 +3,10 @@
 // Subscribes:  /elevation_map  (grid_map_msgs/GridMap, transient_local)
 //              /cf_1/pose      (geometry_msgs/PoseStamped, live start)
 //              /goal_pose      (geometry_msgs/PoseStamped, one-shot trigger)
-// Publishes:   /ballistic_trajectory       (visualization_msgs/Marker,
+// Publishes:   /ballistic_hop_plan         (hopcopter_msgs/HopPlan: each hop's
+//                takeoff and the stance into it; just before the marker pair,
+//                with the same stamp)
+//              /ballistic_trajectory       (visualization_msgs/Marker,
 //                DELETE then ADD SPHERE_LIST, id=400 — the hopcopter contract;
 //                point z = target apex of the hop landing there, i.e. apex height
 //                above that hop's takeoff ground; output.hover_offset for the start)
@@ -33,6 +36,7 @@
 #include <grid_map_core/grid_map_core.hpp>
 #include <grid_map_ros/GridMapRosConverter.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
+#include <hopcopter_msgs/msg/hop_plan.hpp>
 
 #include "ballistic_motion_planner/ballistic_physics.hpp"
 #include "ballistic_motion_planner/hopping_astar.hpp"
@@ -41,6 +45,16 @@
 namespace
 {
 constexpr int kPathMarkerId = 400;  // hopcopter accepts only this id
+constexpr double kDeg = M_PI / 180.0;
+
+geometry_msgs::msg::Vector3 toVector3(const ballistic::Vec3 & v)
+{
+  geometry_msgs::msg::Vector3 out;
+  out.x = v.x;
+  out.y = v.y;
+  out.z = v.z;
+  return out;
+}
 }
 
 class BallisticPlannerNode : public rclcpp::Node
@@ -49,40 +63,58 @@ public:
   BallisticPlannerNode()
   : Node("ballistic_planner")
   {
-    // Physics / search parameters (defaults = config.py's shipped values;
-    // v_g_max and V_max are derived from formulas so parity stays exact).
-    p_.g = declare_parameter("physics.g", 9.81);
-    p_.mass = declare_parameter("physics.mass", 0.8);
-    p_.eta = declare_parameter("physics.eta", 0.7);
-    p_.h_initial = declare_parameter("physics.h_initial", 0.8);
-    p_.min_apex = declare_parameter("physics.min_apex", 0.7);
-    p_.e_inject_max = declare_parameter("physics.e_inject_max", p_.mass * p_.g * 1.0);
-    p_.mu = declare_parameter("physics.mu", 1.2);
+    // Physics / search parameters. Defaults are the robot this repo flies
+    // (ballistic::robot_params(), stage 3 of docs/follow_planner_plan.md);
+    // v_g_max, v_max and e_inject_max are derived from the others.
+    const auto d = ballistic::robot_params();
+    p_.momentum_aware = declare_parameter("search.momentum_aware", d.momentum_aware);
+    p_.g = declare_parameter("physics.g", d.g);
+    p_.mass = declare_parameter("physics.mass", d.mass);
+    p_.eta = declare_parameter("physics.eta", d.eta);
+    p_.h_initial = declare_parameter("physics.h_initial", d.h_initial);
+    p_.min_apex = declare_parameter("physics.min_apex", d.min_apex);
+    // the same budget per kg at any mass
+    p_.e_inject_max = declare_parameter("physics.e_inject_max", d.e_inject_max / d.mass * p_.mass);
+    p_.mu = declare_parameter("physics.mu", d.mu);
     p_.V_g_max = declare_parameter("physics.v_g_max", std::sqrt(2.0 * p_.g * 2.0));
     p_.V_max = declare_parameter(
       "physics.v_max",
       std::sqrt(p_.eta * p_.V_g_max * p_.V_g_max + 2.0 * p_.e_inject_max / p_.mass));
-    p_.speed_bin = declare_parameter("search.speed_bin", 0.25);
-    p_.w_energy = declare_parameter("search.w_energy", 0.84);
-    p_.hop_scan_step = declare_parameter("search.hop_scan_step", 0.1);
-    p_.hop_scan_step_ref_radius = declare_parameter("search.hop_scan_step_ref_radius", 1.0);
-    p_.min_hop_radius = declare_parameter("search.min_hop_radius", 0.0);
-    p_.robot_radius = declare_parameter("robot.radius", 0.03);
-    p_.leg_length = declare_parameter("robot.leg_length", 0.4);
-    p_.min_clearance_gate = declare_parameter("robot.min_clearance", 0.5);
-    p_.steep_grade = declare_parameter("clearance.steep_grade", std::tan(60.0 * M_PI / 180.0));
-    p_.arc_max_step = declare_parameter("clearance.arc_max_step", 0.05);
+    p_.speed_bin = declare_parameter("search.speed_bin", d.speed_bin);
+    p_.w_energy = declare_parameter("search.w_energy", d.w_energy);
+    p_.hop_scan_step = declare_parameter("search.hop_scan_step", d.hop_scan_step);
+    p_.hop_scan_step_ref_radius = declare_parameter(
+      "search.hop_scan_step_ref_radius", d.hop_scan_step_ref_radius);
+    p_.min_hop_radius = declare_parameter("search.min_hop_radius", d.min_hop_radius);
+    p_.bank_bins = static_cast<int>(
+      declare_parameter("search.bank_bins", static_cast<int64_t>(d.bank_bins)));
+    p_.robot_radius = declare_parameter("robot.radius", d.robot_radius);
+    p_.leg_length = declare_parameter("robot.leg_length", d.leg_length);
+    p_.min_clearance_gate = declare_parameter("robot.min_clearance", d.min_clearance_gate);
+    p_.steep_grade = declare_parameter("clearance.steep_grade", d.steep_grade);
+    p_.arc_max_step = declare_parameter("clearance.arc_max_step", d.arc_max_step);
+    // momentum_aware only: the stance model (hopcopter.py's k2), the landing tilt
+    // cap, the leg-angle floor and the push stage 2 measured
+    p_.k2 = declare_parameter("stance.k2", d.k2);
+    p_.tau_max = declare_parameter("stance.max_tilt_deg", d.tau_max / kDeg) * kDeg;
+    p_.alpha_leg_min = declare_parameter("stance.min_leg_angle_deg", d.alpha_leg_min / kDeg) * kDeg;
+    p_.push.accel = declare_parameter("push.accel", d.push.accel);
+    p_.push.g_coast = declare_parameter("push.g_coast", d.push.g_coast);
+    p_.push.t_offset = declare_parameter("push.time_offset", d.push.t_offset);
+    p_.push.t_max = declare_parameter("push.max_time", d.push.t_max);
     // Target apex for the start point, which no planned hop lands on.
     hover_offset_ = declare_parameter("output.hover_offset", 0.8);
     // Render each plan's snapshot to a PNG (vis_planned_path/) in the background.
     render_png_ = declare_parameter("output.render_png", true);
     const auto map_topic = declare_parameter("topics.map", std::string("/elevation_map"));
     const auto traj_topic = declare_parameter("topics.trajectory", std::string("/ballistic_trajectory"));
+    const auto plan_topic = declare_parameter("topics.hop_plan", std::string("/ballistic_hop_plan"));
 
     // Each check guards a silent plan-returns-nothing failure.
     ballistic::validate_params(p_);
 
     traj_pub_ = create_publisher<visualization_msgs::msg::Marker>(traj_topic, 10);
+    plan_pub_ = create_publisher<hopcopter_msgs::msg::HopPlan>(plan_topic, 10);
     start_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
       "/trajectory_start_position", 10);
 
@@ -127,8 +159,9 @@ public:
     }
 
     RCLCPP_INFO(get_logger(),
-      "Ballistic planner ready. Waiting for %s and /cf_1/pose; "
-      "plans once per /goal_pose.", map_topic.c_str());
+      "Ballistic planner ready (%s search). Waiting for %s and /cf_1/pose; "
+      "plans once per /goal_pose.",
+      p_.momentum_aware ? "momentum-aware" : "reference", map_topic.c_str());
   }
 
 private:
@@ -175,25 +208,34 @@ private:
 
       if (!path) {
         RCLCPP_ERROR(get_logger(),
-          "No path found from (%.2f, %.2f) to (%.2f, %.2f) "
+          "No path found from (%.2f, %.2f) to (%.2f, %.2f)%s "
           "[prep %.1f ms, search %.1f ms, %ld expansions].",
-          robot_x_, robot_y_, gx, gy, prep_ms, plan_ms, planner.n_expansions());
+          robot_x_, robot_y_, gx, gy,
+          planner.recheck_failed() ?
+          ": the search's path exceeds the landing tilt cap with its exact arrival directions" : "",
+          prep_ms, plan_ms, planner.n_expansions());
         return;
       }
 
       RCLCPP_INFO(get_logger(),
         "[TIMING] Path with %zu waypoints: map+fields %.1f ms, A* %.1f ms "
-        "(%ld expansions, %ld edge checks, %ld accepted)",
+        "(%ld expansions, %ld edge checks, %ld accepted; %ld hops over the tilt cap, "
+        "%ld over one push)",
         path->size(), prep_ms, plan_ms, planner.n_expansions(),
-        planner.n_edge_checks(), planner.n_edges_accepted());
+        planner.n_edge_checks(), planner.n_edges_accepted(),
+        planner.n_tilt_rejects(), planner.n_push_rejects());
       logHopTable(planner);
 
-      publishTrajectory(*path, planner.path_hops());
+      // HopPlan first, then the marker pair, all with one stamp.
+      const auto now_stamp = now();
+      publishHopPlan(*map, *path, planner, now_stamp);
+      publishTrajectory(*path, planner.path_hops(), now_stamp);
       publishStartPosition(*map);
       const auto stamp = makeStamp();
-      writeCsvs(*map, *path, planner.path_hops(), stamp);
+      writeCsvs(*map, *path, planner.path_hops(), planner.path_stances(), stamp);
       const auto snapshot = writeVisSnapshot(
-        *map, *path, planner.path_hops(), planner.v_g_initial(), gx, gy, stamp);
+        *map, *path, planner.path_hops(), planner.path_stances(), planner.v_g_initial(),
+        gx, gy, stamp);
       if (render_png_ && !snapshot.empty()) {
         renderSnapshot(snapshot);
       }
@@ -231,21 +273,76 @@ private:
     return map;
   }
 
+  // tilt is the landing that launches each hop; the last line is the stop.
   void logHopTable(const ballistic::HoppingAStarPlanner & planner)
   {
     std::ostringstream oss;
-    oss << "\nhop      X      Z   alpha    v_s   v_g   drop   E_inj\n";
+    oss << "\nhop      X      Z   alpha  a_leg    v_s   v_g   drop    J/kg   tilt\n";
     const auto & hops = planner.path_hops();
+    const auto & stances = planner.path_stances();
     for (size_t i = 0; i < hops.size(); ++i) {
       const auto & h = hops[i];
       char line[160];
       std::snprintf(line, sizeof(line),
-        "%3zu  %5.2f %+6.2f  %5.1f  %5.2f %5.2f  %5.2f  %6.2f J\n",
-        i + 1, h.X, h.Z, h.alpha_s * 180.0 / M_PI, h.v_s, h.v_g,
-        h.apex_drop, h.e_inject);
+        "%3zu  %5.2f %+6.2f  %5.1f  %5.1f  %5.2f %5.2f  %5.2f  %6.2f  %5.1f\n",
+        i + 1, h.X, h.Z, h.alpha_s / kDeg, h.alpha_leg / kDeg, h.v_s, h.v_g,
+        h.apex_drop, h.e_inject / p_.mass, stances[i].tilt / kDeg);
       oss << line;
     }
+    char line[80];
+    std::snprintf(line, sizeof(line), "stop at the goal: tilt %.1f", stances.back().tilt / kDeg);
+    oss << line;
     RCLCPP_INFO(get_logger(), "%s", oss.str().c_str());
+  }
+
+  // Each hop's takeoff, and the stance the planner computed for it.
+  void publishHopPlan(
+    const ballistic::Map2D5 & map,
+    const std::vector<std::pair<double, double>> & path,
+    const ballistic::HoppingAStarPlanner & planner,
+    const rclcpp::Time & stamp)
+  {
+    if (path.size() < 2) {
+      return;  // no hop, and no marker either (publishTrajectory)
+    }
+    const auto & hops = planner.path_hops();
+    const auto & stances = planner.path_stances();
+    hopcopter_msgs::msg::HopPlan msg;
+    msg.header.frame_id = "world";
+    msg.header.stamp = stamp;
+    const auto [rs, cs] = map.world_to_grid(path[0].first, path[0].second);
+    msg.start.x = path[0].first;
+    msg.start.y = path[0].second;
+    msg.start.z = map.at(rs, cs);
+    msg.start_speed = hops[0].v_g_in;
+    msg.start_axis = toVector3(stances[0].axis);
+    msg.start_tilt = stances[0].tilt;
+    for (size_t i = 0; i < hops.size(); ++i) {
+      const auto & h = hops[i];
+      hopcopter_msgs::msg::PlannedHop hop;
+      const auto [r, c] = map.world_to_grid(path[i + 1].first, path[i + 1].second);
+      hop.landing.x = path[i + 1].first;
+      hop.landing.y = path[i + 1].second;
+      hop.landing.z = map.at(r, c);
+      hop.heading = h.heading;
+      hop.alpha_leg = h.alpha_leg;
+      hop.v_leg = h.v_leg;
+      hop.v_h = h.v_h;
+      hop.target_apex = h.apex_drop + h.Z;
+      hop.e_inject_per_kg = h.e_inject / p_.mass;
+      const double v_z = std::sqrt(std::max(0.0, h.v_g * h.v_g - h.v_h * h.v_h));
+      hop.arrival_velocity.x = h.v_h * std::cos(h.heading);
+      hop.arrival_velocity.y = h.v_h * std::sin(h.heading);
+      hop.arrival_velocity.z = -v_z;
+      hop.landing_axis = toVector3(stances[i + 1].axis);
+      hop.landing_tilt = stances[i + 1].tilt;
+      msg.hops.push_back(hop);
+    }
+    msg.momentum_aware = p_.momentum_aware;
+    msg.g = p_.g;
+    msg.eta = p_.eta;
+    msg.k2 = p_.k2;
+    plan_pub_->publish(msg);
   }
 
   // Apex height above takeoff ground of the hop that lands on path[i].
@@ -261,7 +358,8 @@ private:
 
   void publishTrajectory(
     const std::vector<std::pair<double, double>> & path,
-    const std::vector<ballistic::Hop> & hops)
+    const std::vector<ballistic::Hop> & hops,
+    const rclcpp::Time & stamp)
   {
     if (path.size() < 2) {
       RCLCPP_WARN(get_logger(),
@@ -274,14 +372,14 @@ private:
     // fall back to the previous goal. The pair is load-bearing.
     visualization_msgs::msg::Marker del;
     del.header.frame_id = "world";
-    del.header.stamp = now();
+    del.header.stamp = stamp;
     del.id = kPathMarkerId;
     del.action = visualization_msgs::msg::Marker::DELETE;
     traj_pub_->publish(del);
 
     visualization_msgs::msg::Marker m;
     m.header.frame_id = "world";
-    m.header.stamp = now();
+    m.header.stamp = stamp;
     m.ns = "ballistic_path";
     m.id = kPathMarkerId;
     m.type = visualization_msgs::msg::Marker::SPHERE_LIST;
@@ -354,6 +452,7 @@ private:
     const ballistic::Map2D5 & map,
     const std::vector<std::pair<double, double>> & path,
     const std::vector<ballistic::Hop> & hops,
+    const std::vector<ballistic::Stance> & stances,
     double v_g_initial, double gx, double gy,
     const std::string & stamp)
   {
@@ -413,8 +512,10 @@ private:
     jsonArray(f, "standable", standable);
     jsonArray(f, "inflated", inflated);
     f << "\"leg_length\": " << p_.leg_length << ",\n"
-      << "\"arc_max_step\": " << p_.arc_max_step << ",\n";
-    writeHopSideViews(f, map, path, hops, inflated);
+      << "\"arc_max_step\": " << p_.arc_max_step << ",\n"
+      << "\"momentum_aware\": " << (p_.momentum_aware ? "true" : "false") << ",\n"
+      << "\"stop_tilt\": " << stances.back().tilt << ",\n";
+    writeHopSideViews(f, map, path, hops, stances, inflated);
     f << "\"format\": 2\n}\n";
     return file;
   }
@@ -428,6 +529,7 @@ private:
     const ballistic::Map2D5 & map,
     const std::vector<std::pair<double, double>> & path,
     const std::vector<ballistic::Hop> & hops,
+    const std::vector<ballistic::Stance> & stances,
     const std::vector<double> & inflated)
   {
     f << "\"hops\": [\n";
@@ -474,7 +576,11 @@ private:
       f << ", \"t_s\": " << t_s << ", \"t_g\": " << t_g
         << ", \"alpha_s\": " << h.alpha_s << ", \"X\": " << h.X << ", \"Z\": " << h.Z
         << ", \"apex_drop\": " << h.apex_drop
-        << ", \"target_apex\": " << h.apex_drop + h.Z << "}";
+        << ", \"target_apex\": " << h.apex_drop + h.Z
+        << ", \"heading\": " << h.heading << ", \"alpha_leg\": " << h.alpha_leg
+        << ", \"v_leg\": " << h.v_leg << ", \"v_h\": " << h.v_h
+        << ", \"launch_tilt\": " << stances[i].tilt
+        << ", \"land_tilt\": " << stances[i + 1].tilt << "}";
     }
     f << "\n],\n";
   }
@@ -500,6 +606,7 @@ private:
     const ballistic::Map2D5 & map,
     const std::vector<std::pair<double, double>> & path,
     const std::vector<ballistic::Hop> & hops,
+    const std::vector<ballistic::Stance> & stances,
     const std::string & stamp)
   {
     {
@@ -516,14 +623,20 @@ private:
     {
       std::ofstream f(csv_dir_ + "/ballistic_hops_" + stamp + ".csv");
       if (f) {
-        f << "hop,X,Z,alpha_deg,v_s,v_g,v_g_in,e_inject,apex_drop,target_apex,hop_radius\n"
+        // launch_tilt: the landing that launches this hop; land_tilt: this hop's
+        // landing (the next launch, or the stop at the goal)
+        f << "hop,X,Z,alpha_deg,v_s,v_g,v_g_in,e_inject,apex_drop,target_apex,hop_radius,"
+             "heading_deg,alpha_leg_deg,v_leg,v_h,e_inject_per_kg,launch_tilt_deg,land_tilt_deg\n"
           << std::fixed << std::setprecision(6);
         for (size_t i = 0; i < hops.size(); ++i) {
           const auto & h = hops[i];
           f << i + 1 << "," << h.X << "," << h.Z << ","
             << h.alpha_s * 180.0 / M_PI << "," << h.v_s << "," << h.v_g << ","
             << h.v_g_in << "," << h.e_inject << "," << h.apex_drop << ","
-            << h.apex_drop + h.Z << "," << h.hop_radius << "\n";
+            << h.apex_drop + h.Z << "," << h.hop_radius << ","
+            << h.heading / kDeg << "," << h.alpha_leg / kDeg << "," << h.v_leg << ","
+            << h.v_h << "," << h.e_inject / p_.mass << ","
+            << stances[i].tilt / kDeg << "," << stances[i + 1].tilt / kDeg << "\n";
         }
       } else {
         RCLCPP_ERROR(get_logger(), "Failed to open hops CSV in %s", csv_dir_.c_str());
@@ -573,6 +686,7 @@ private:
   bool have_pose_ = false;
 
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr traj_pub_;
+  rclcpp::Publisher<hopcopter_msgs::msg::HopPlan>::SharedPtr plan_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr start_pub_;
   rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr map_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;

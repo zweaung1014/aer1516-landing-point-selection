@@ -66,7 +66,10 @@ until **Play** is pressed in the Gazebo GUI. A goal then goes in either by publi
 `/goal_pose` directly or by running `nlp_goal_node`.
 
 There is **no test suite for the simulation**. The `test/` directories in the Python packages
-contain only the stock ament flake8/pep257/copyright linters. Verification is done by running
+contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
+`test_waypoint_tracker.py`. Run it with
+`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py`.
+It covers waypoint decisions and the braking tilt guard. Everything else is verified by running
 the sim and inspecting the CSVs it writes (below).
 
 ### Analysis scripts (run from the repo root, not the workspace)
@@ -112,28 +115,40 @@ not use TF or the LiDAR. Each plan also writes `snapshot_<stamp>.json` to
 with the same layout as the reference `main.py`, plus a side view of each hop (arc, inflated
 terrain and clearance from the planner's own `arc_samples`). Turn this off with `output.render_png:=false`.
 
-**2. `hopcopter`** (`hopping_robot/hopping_robot/hopcopter.py`) owns the waypoint queue. It
-consumes the marker (id=400), holds `self.waypoint_list`, and pops the next target once the
-current one is inside `current_goal_tolerance`, holding the last position when the list
-empties. `_load_next_waypoint` sets `desired_x/y` from the waypoint and `desired_z` from its z
-(the planner's `target_apex`); `desired_z` falls back to `desired_rel_z` (0.8 m) before a path
-arrives and after the last waypoint. `desired_rel_z` is a ROS parameter that can change mid-run
-(`ros2 param set /hopcopter desired_rel_z 1.0`). At each apex (3 → 1) `JumpingHeightController.step()` turns
-`desired_z` into the next powered-climb duration (fixed thrust, duration clamped to
-`t_p_low..t_p_high`) — this is how hop height follows the plan. Warm-up hops use
-`desired_rel_z`. Height control is approximate: JHC estimates the last hop's energy from fall
-time, reacts one hop late, and the takeoff angle is still chosen by `LinearJumpingController`,
-not the planner. Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnboard`
+**2. `hopcopter`** (`hopping_robot/hopping_robot/hopcopter.py`) follows the path one waypoint
+per hop. It consumes the marker (id=400) into a `WaypointTracker` (`JumpLib/waypoint_tracker.py`,
+pure Python, unit-tested in `test/test_waypoint_tracker.py`). At each steering apex (3 → 1), at
+most once per real touchdown, the tracker decides from the predicted **foot** landing point P
+(LSE's CoM prediction minus the leg along the planned landing attitude) where the next hop aims:
+- **track:** P is within `reach` (0.8 m) of the waypoint this flight was aimed at, so aim at the
+  next one with its `target_apex`;
+- **retry:** P missed it, so aim at it again; after two retries, **hold**;
+- **goal:** on the last waypoint, hop in place there;
+- **idle:** no path yet, hop in place at the start.
+
+A new path re-syncs to the waypoint nearest P, and the tracker catches up past waypoints the
+robot overshot. A DELETE keeps the current path unless no ADD follows within 0.5 s. There is no
+distance pop and no counter, so a missed apex costs one hop. Hops in place use `desired_rel_z`
+(0.8 m), a ROS parameter that can change mid-run
+(`ros2 param set /hopcopter desired_rel_z 1.0`).
+
+At each apex `JumpingHeightController.step()` turns the chosen target apex into the next
+powered-climb duration (fixed thrust, duration clamped to `t_p_low..t_p_high`). This is how hop
+height follows the plan. Warm-up hops use `desired_rel_z`. Height control is approximate: JHC
+estimates the last hop's energy from fall time and reacts one hop late. The takeoff angle is
+still chosen by `LinearJumpingController`, not the planner. Its `limit_landing_tilt` (braking
+tilt guard) rotates a takeoff that needs more than 20° of landing tilt toward continuing the
+arrival. Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnboard`
 (`JumpLib/jumping_tools.py`), whose `jumping_state` is the clock for the whole system:
 
 - **1 — falling/ballistic:** unpowered, attitude tracked from the planned arc (`LinearJumpingController`).
 - **2 — stance:** foot down, inverted-pendulum swing, unpowered.
 - **3 — climbing:** powered thrust; a new hop begins here.
 
-After the apex (3 → 1) it predicts the landing point (`LandingStateEstimator`), plans the
-ballistic arc, and derives the roll/pitch that steer it. It also keeps a `/trajectory_start_position`
-subscription and `apply_follower_gating` to drop waypoints behind the robot when a new path
-arrives.
+After the apex (3 → 1) it predicts the landing point (`LandingStateEstimator`, using
+`leg_length` 0.366 m as the touchdown CoM height and g′ 9.55), decides the waypoint, plans the
+ballistic arc, and derives the roll/pitch that steer it. Each decision is a row in
+`hop_tracking/apex_decisions_*.csv`.
 
 **3. `elevation_map_publisher_node`** (`elevation_map_publisher/`) publishes the **known** 2.5D
 map on `/elevation_map` (`grid_map_msgs/GridMap`, transient_local so late subscribers still get

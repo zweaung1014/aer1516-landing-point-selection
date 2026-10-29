@@ -396,10 +396,12 @@ def main():
     print("\n== Apex decisions" + (f": {dec_path}" if dec_path else ": no matching apex_decisions CSV"))
     if dec_path:
         dec = pd.read_csv(dec_path)
-        cols = ["hop_number", "steering", "target_idx", "target_x", "target_y", "target_apex",
-                "pred_land_x", "pred_land_y", "takeoff_elev_deg", "unreachable", "cmd_tilt_deg",
+        cols = ["hop_number", "decided", "mode", "land_idx", "target_idx", "retries",
+                "foot_land_x", "foot_land_y", "target_x", "target_y", "target_apex",
+                "takeoff_elev_deg", "unreachable", "planned_tilt_deg", "cmd_tilt_deg",
                 "jhc_nominal_h", "push_time"]
-        with pd.option_context("display.width", 200, "display.max_rows", 200):
+        cols = [c for c in cols if c in dec.columns]   # older logs lack the stage 1 columns
+        with pd.option_context("display.width", 220, "display.max_rows", 200):
             print(dec[cols].to_string(index=False))
 
 

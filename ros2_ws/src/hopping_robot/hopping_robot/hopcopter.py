@@ -39,6 +39,7 @@ from hopping_robot.JumpLib.jumping_model import LandingStateEstimator
 from hopping_robot.JumpLib.jumping_tools import JumpingHeightController
 from hopping_robot.JumpLib.jumping_model import LinearJumpingController
 from hopping_robot.JumpLib.jumping_model import InPlaneJumpingModel
+from hopping_robot.JumpLib.waypoint_tracker import WaypointTracker
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
 
@@ -106,8 +107,12 @@ class hopcopter(Node):
         self.flight_enable = False
         self.controller_start_flag = True
         self.G = 9.6
-        self.G_flight_time_mocap = 9.8
-        self.leg_length = 0.4
+        # Effective gravity in an unpowered fall at idle thrust (stage 0 measured 9.55 level,
+        # 9.0-9.3 steered); predicts the fall time and the landing speed at each apex
+        self.G_flight_time_mocap = 9.55
+        # CoM height at touchdown with the leg fully extended (stage 0 measured 0.367). It used
+        # to be the filtered z at the first touchdown, 0.420, which made LSE predict landings short
+        self.leg_length = 0.366
         self.jumping_counter = 0
         self.jumping_height_record = 0.5  # CoM vertical movement distance
         self.powered_climbing_thrust = 21000 # might need to tune this, was 15000
@@ -166,23 +171,25 @@ class hopcopter(Node):
         self.dvel_x, self.dvel_y, self.dvel_z = 0.0, 0.0, 0.0
         self._odom_prev = None  # (stamp, x, y, z) of the previous odom message
 
-        # Trajectory following variables
-        self.waypoint_list = []  # List of (x, y, z) tuples
-        self.current_goal_tolerance = 0.4  # meters - configurable tolerance
-        self.has_active_goal = False
-        self.goal_reached_count = 0
-        self.last_waypoint_position = None  # Store last completed waypoint
-        self.pending_new_traj = False       # True between DELETE and ADD to avoid jumps
-        self.trajectory_received = False    # Only allow control after first trajectory received
+        # Trajectory following: the tracker picks each hop's waypoint at the steering apex,
+        # from where that flight will land (one decision per real touchdown)
+        self.tracker = WaypointTracker(reach=0.8, max_retries=2)
         self.path_id = None                 # header stamp [s] of the accepted id=400 marker
-        self._path_xy = []                  # its waypoints as published, before gating
+        self._delete_time = None            # wall time of a DELETE not yet followed by an ADD
+        self.delete_timeout = 0.5           # [s] drop the path if no ADD follows a DELETE
+        self.min_fall_time = 0.15           # [s] a touchdown sooner after the apex is a false trigger
+        self._apex_abs_time = -math.inf     # Abs_time of the latest apex
+        self._touchdown_since_decision = True
+        self._decision = None               # latest committed Decision
+        # Braking tilt guard (D4): never command a landing tilt above this
+        self.landing_tilt_max = math.radians(20.0)
 
-        # Initialize desired positions as None until trajectory is received
+        # Initialize desired positions as None until the first tick
         self.desired_x = None
         self.desired_y = None
         # desired_z is the hop apex height above the takeoff ground, taken from
         # the planner's waypoint z (target_apex); desired_rel_z is the default
-        # used before a path arrives, during warm-up, and after the last waypoint.
+        # used before a path arrives, during warm-up, and when hopping in place.
         # desired_rel_z is a ROS parameter so an in-place apex sweep can change it
         # at runtime: ros2 param set /hopcopter desired_rel_z 1.0
         self.desired_rel_z = self.declare_parameter('desired_rel_z', 0.8).value
@@ -201,26 +208,13 @@ class hopcopter(Node):
         self._emap_ncols = 0         # cells along y
         self._emap_outer_start = 0
         self._emap_inner_start = 0
-        
-        # Trajectory start position tracking for follower-gating
-        self.trajectory_start_x = 0.0
-        self.trajectory_start_y = 0.0
-        self.trajectory_start_received = False
-        
+
         # Subscribe to trajectory from the ballistic motion planner
         # (Marker id=400 contract)
         self.ballistic_trajectory_sub = self.create_subscription(
             Marker,
             '/ballistic_trajectory',
             self.trajectory_callback,
-            10
-        )
-        
-        # Subscribe to trajectory start position from the ballistic planner for follower-gating
-        self.traj_start_sub = self.create_subscription(
-            PoseStamped,
-            '/trajectory_start_position',
-            self.trajectory_start_callback,
             10
         )
 
@@ -352,15 +346,18 @@ class hopcopter(Node):
         self.dec_csv_writer = csv.writer(self.dec_csv_file)
         self.dec_csv_writer.writerow([
             'timestamp', 'odom_stamp', 'hop_number', 'steering',
-            'path_id', 'target_idx', 'wp_remaining',
+            # decided: 1 if this apex made a decision (0: no real touchdown since the last one);
+            # land_idx: waypoint this flight was aimed at; target_idx: what the next hop aims at
+            'path_id', 'decided', 'mode', 'land_idx', 'target_idx', 'retries',
             'target_x', 'target_y', 'target_apex',
             'apex_x', 'apex_y', 'apex_z',
             'odom_vx', 'odom_vy', 'odom_vz',
             'diff_vx', 'diff_vy', 'diff_vz',
             'fall_h', 'fall_time', 'land_vz',
-            'pred_land_x', 'pred_land_y',
+            'pred_land_x', 'pred_land_y', 'foot_land_x', 'foot_land_y',
             'takeoff_heading_deg', 'takeoff_elev_deg', 'unreachable',
-            'cmd_roll_deg', 'cmd_pitch_deg', 'cmd_tilt_deg', 'theta_v_deg',
+            'cmd_roll_deg', 'cmd_pitch_deg', 'cmd_tilt_deg', 'planned_tilt_deg', 'tilt_capped',
+            'theta_v_deg',
             'jhc_nominal_h', 'push_time',
         ])
         self.get_logger().info(f'Apex-decision CSV: {dec_csv_filename}')
@@ -503,16 +500,6 @@ class hopcopter(Node):
             return self.current_ground_z
         return float(z)
 
-    def trajectory_start_callback(self, msg: PoseStamped) -> None:
-        """Handle trajectory start position from the ballistic planner for follower-gating"""
-        try:
-            self.trajectory_start_x = msg.pose.position.x
-            self.trajectory_start_y = msg.pose.position.y
-            self.trajectory_start_received = True
-            self.get_logger().info(f"Received trajectory start position: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f})")
-        except Exception as e:
-            self.get_logger().error(f"Error in trajectory_start_callback: {e}")
-
     def trajectory_callback(self, msg: Marker) -> None:
         """Handle incoming trajectory messages from /ballistic_trajectory"""
         try:
@@ -527,24 +514,13 @@ class hopcopter(Node):
                 if len(msg.points) > 1:
                     # Identify the path in the decision log by the marker's stamp
                     self.path_id = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-                    self._path_xy = [(float(p.x), float(p.y)) for p in msg.points]
-
-                    # Apply follower-gating to filter out "behind" points
-                    filtered_points = self.apply_follower_gating(msg.points)
-                    
-                    # Clear existing trajectory and populate with new waypoints
-                    self.waypoint_list.clear()
-                    for point in filtered_points:
-                        waypoint = (float(point.x), float(point.y), float(point.z))
-                        self.waypoint_list.append(waypoint)
-
-                    # Mark that we've received our first trajectory
-                    self.trajectory_received = True
-
-                    # New trajectory is ready; clear pending flag and load first waypoint
-                    self.pending_new_traj = False
-                    if len(self.waypoint_list) > 0:
-                        self._load_next_waypoint()
+                    # Each point's z is the planner's target apex for the hop that lands on it.
+                    # The tracker syncs to the path at the next steering apex, from where that
+                    # flight lands, so points behind the robot need no filtering here.
+                    self.tracker.set_path([(p.x, p.y, p.z) for p in msg.points])
+                    self._delete_time = None
+                    self.get_logger().info(
+                        "New path: " + " -> ".join(f"({p.x:.2f}, {p.y:.2f})" for p in msg.points))
                 else:
                     # Ignore single-point goal messages on id==400 as well
                     self.get_logger().info(f"Ignoring single-point goal message (id={msg.id})")
@@ -555,86 +531,13 @@ class hopcopter(Node):
                     self.get_logger().info(f"Ignoring DELETE for id={msg.id} (only id=400 used)")
                     return
 
-                # Clear trajectory
-                self.waypoint_list.clear()
-                # Mark that an updated trajectory is incoming to suppress fallback to last goal
-                self.has_active_goal = False
-                self.pending_new_traj = True
-                self.get_logger().info("Trajectory (id=400) cleared (awaiting new path)")
-                
+                # The planner sends DELETE right before every new path, so keep flying the
+                # current one; RPYT_commands drops it if no ADD follows within delete_timeout
+                self._delete_time = time.time()
+
         except Exception as e:
             self.get_logger().error(f"Error in trajectory_callback: {e}")
-    
-    def apply_follower_gating(self, trajectory_points):
-        """Filter trajectory points to remove those behind current robot position"""
-        if not self.trajectory_start_received or len(trajectory_points) < 2:
-            return trajectory_points
-            
-        # Calculate trajectory direction vector (from start toward goal)
-        start_point = trajectory_points[0] 
-        end_point = trajectory_points[-1]
-        traj_direction_x = end_point.x - start_point.x
-        traj_direction_y = end_point.y - start_point.y
-        
-        # Normalize direction vector
-        traj_length = math.sqrt(traj_direction_x**2 + traj_direction_y**2)
-        if traj_length < 1e-6:  # Avoid division by zero
-            return trajectory_points
-            
-        traj_dir_norm_x = traj_direction_x / traj_length
-        traj_dir_norm_y = traj_direction_y / traj_length
-        
-        # Current robot position when trajectory is ready
-        current_robot_x = self.pos_x
-        current_robot_y = self.pos_y
-        
-        filtered_points = []
-        for point in trajectory_points:
-            # Vector from current robot position to this trajectory point
-            to_point_x = point.x - current_robot_x
-            to_point_y = point.y - current_robot_y
-            
-            # Dot product with trajectory direction (positive = ahead, negative = behind)
-            dot_product = to_point_x * traj_dir_norm_x + to_point_y * traj_dir_norm_y
-            
-            # Keep points that are ahead of current robot position (with small tolerance)
-            if dot_product >= -0.1:  # Small negative tolerance for numerical stability
-                filtered_points.append(point)
-        
-        # Ensure we always have at least one point
-        if not filtered_points and trajectory_points:
-            filtered_points = [trajectory_points[0]]
-            
-        self.get_logger().info(f"Follower-gating: filtered {len(trajectory_points)} -> {len(filtered_points)} points")
-        return filtered_points
-    
-    def _load_next_waypoint(self):
-        """Load the next waypoint from the list as the current goal (pops index 0)"""
-        if len(self.waypoint_list) > 0:
-            waypoint = self.waypoint_list.pop(0)  # Remove and return first element
-            # The waypoint's z is the planner's target apex (height above the
-            # takeoff ground) for the hop that lands on this waypoint.
-            wx, wy, wz = waypoint
-            self.desired_x = wx
-            self.desired_y = wy
-            self.desired_z = wz
-            self.desired_yaw = 0.0  # Keep yaw at 0 as requested
-            self.has_active_goal = True
-            # Store this as the last waypoint position (XY only)
-            self.last_waypoint_position = (self.desired_x, self.desired_y)
-            self.get_logger().info(
-                f"New goal: x={self.desired_x:.3f}, y={self.desired_y:.3f}, "
-                f"target_apex={self.desired_z:.3f}")
-        else:
-            # No more waypoints - hold the last position if we had one
-            if self.last_waypoint_position is not None:
-                self.desired_x, self.desired_y = self.last_waypoint_position
-                self.desired_yaw = 0.0
-                self.desired_z = self.desired_rel_z  # hop in place at the default height
-                self.get_logger().info(f"All waypoints completed - holding last position: x={self.desired_x:.3f}, y={self.desired_y:.3f}")
-            self.has_active_goal = False
-            self.get_logger().info("All waypoints completed")
-    
+
     def motorPower(self, msg):
         """
         Store the four PWM values that arrive in the same order you
@@ -674,52 +577,103 @@ class hopcopter(Node):
         # )
     
     def _on_set_parameters(self, params):
-        """Apply a runtime change of desired_rel_z (in-place apex sweeps)."""
+        """Apply a runtime change of desired_rel_z (in-place apex sweeps). Hops in place read it
+        at every apex, so the new value applies from the next one."""
         for p in params:
             if p.name == 'desired_rel_z':
                 if p.value <= 0.0:
                     return SetParametersResult(successful=False, reason='desired_rel_z must be > 0')
                 self.desired_rel_z = p.value
-                # Hopping in place (no path yet, or past the last waypoint) uses
-                # desired_z after warm-up, so it follows the new value too
-                if not self.has_active_goal:
-                    self.desired_z = p.value
                 self.get_logger().info(f'desired_rel_z set to {p.value:.3f} m')
         return SetParametersResult(successful=True)
 
-    def _target_index(self):
-        """Index in the published path of the waypoint being aimed at, or '' with no path."""
-        if not self._path_xy or self.desired_x is None:
-            return ''
-        return min(range(len(self._path_xy)),
-                   key=lambda i: (self._path_xy[i][0] - self.desired_x) ** 2
-                   + (self._path_xy[i][1] - self.desired_y) ** 2)
+    def _steer(self, aim_x, aim_y, fall_h, landing_speed_z, yaw, abs_time):
+        """Plan this fall's landing attitude so that the next takeoff heads for (aim_x, aim_y),
+        under the braking tilt guard. Returns the landing attitude (body z axis, world frame)
+        and the tilt the unguarded plan needed."""
+        self.LJC.set_reference(aim_x, aim_y, fall_h)
+        self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z,
+                                      self.LSE.landing_x, self.LSE.landing_y)
+        self.LJC.jumping_planning()
+        tilt_planned = self.LJC.limit_landing_tilt(self.landing_tilt_max)
+        return self.LJC.inverse_jumping_model(yaw, abs_time), tilt_planned
 
-    def _log_apex_decision(self, target_apex, fall_h, fall_time, land_vz, landing_attitude_z_b):
+    def _decide_and_steer(self, fall_h, landing_speed_z, yaw, abs_time):
+        """At a steering apex: decide what the next hop aims at from where this flight will
+        land, then plan the landing attitude toward it. Returns the decision, the landing
+        attitude and what the decision log needs."""
+        land_before = self.tracker.land
+        p_com = (self.LSE.landing_x, self.LSE.landing_y)
+        decided = self._touchdown_since_decision or self._decision is None
+        if decided:
+            d = self.tracker.decide(*p_com)
+            z_b, tilt_planned = self._steer(d.aim_x, d.aim_y, fall_h, landing_speed_z, yaw, abs_time)
+            # Waypoints are foot positions, and the foot lands away from the CoM along the
+            # landing tilt: decide again from the foot, and re-plan if the aim changes
+            foot = (p_com[0] - self.leg_length * z_b[0], p_com[1] - self.leg_length * z_b[1])
+            d_foot = self.tracker.decide(*foot)
+            if (d_foot.mode, d_foot.land, d_foot.aim_x, d_foot.aim_y) != (d.mode, d.land, d.aim_x, d.aim_y):
+                z_b, tilt_planned = self._steer(d_foot.aim_x, d_foot.aim_y, fall_h, landing_speed_z,
+                                                yaw, abs_time)
+            d = d_foot
+            prev = self._decision
+            self.tracker.apply(d)
+            self._decision = d
+            self._touchdown_since_decision = False
+            if prev is None or (prev.mode, prev.land) != (d.mode, d.land):
+                msg = (f"Apex: landing at ({foot[0]:.2f}, {foot[1]:.2f}), {d.mode} -> aim at "
+                       f"({d.aim_x:.2f}, {d.aim_y:.2f})"
+                       + ("" if d.land is None else f", waypoint {d.land}")
+                       + ("" if d.apex is None else f", apex {d.apex:.3f}")
+                       + (f" ({d.reason})" if d.reason else ""))
+                if d.mode in ('retry', 'hold'):
+                    self.get_logger().warn(msg)
+                else:
+                    self.get_logger().info(msg)
+        else:
+            # No real touchdown since the last decision (a false trigger): keep its aim
+            d = self._decision
+            z_b, tilt_planned = self._steer(d.aim_x, d.aim_y, fall_h, landing_speed_z, yaw, abs_time)
+            foot = (p_com[0] - self.leg_length * z_b[0], p_com[1] - self.leg_length * z_b[1])
+        self.desired_x, self.desired_y = d.aim_x, d.aim_y
+        return d, z_b, {'decided': decided, 'land_before': land_before, 'foot': foot,
+                        'tilt_planned': tilt_planned}
+
+    def _log_apex_decision(self, target_apex, fall_h, fall_time, land_vz, landing_attitude_z_b,
+                           steer_log=None):
         """One row per apex: the state the controller acted on and what it commanded.
-        landing_attitude_z_b is None on warm-up apexes, which do not steer."""
+        landing_attitude_z_b and steer_log are None on warm-up apexes, which do not steer."""
         if landing_attitude_z_b is not None:
+            d = self._decision
             tv = self.LJC.takeoff_velocity  # unit takeoff direction handed to the stance model
+            idx = lambda k: '' if k is None else k  # noqa: E731
+            decision = [int(steer_log['decided']), d.mode, idx(steer_log['land_before']),
+                        idx(d.land), d.retries]
+            foot = [f'{steer_log["foot"][0]:.4f}', f'{steer_log["foot"][1]:.4f}']
             steer = [
                 f'{math.degrees(math.atan2(tv[1], tv[0])):.3f}',
                 f'{math.degrees(math.asin(self.saturation(tv[2], 1.0, -1.0))):.3f}',
                 int(self.LJC.norm_d > self.LJC.norm_d_max),
                 f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}',
                 f'{math.degrees(math.acos(self.saturation(landing_attitude_z_b[2], 1.0, -1.0))):.3f}',
+                f'{math.degrees(steer_log["tilt_planned"]):.3f}',
+                int(steer_log['tilt_planned'] > self.landing_tilt_max),
                 f'{math.degrees(self.IPJM.theta_v):.3f}',
             ]
         else:
-            steer = ['', '', '', f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}', '', '']
+            decision = ['', 'warmup', '', '', '']
+            foot = ['', '']
+            steer = ['', '', '', f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}', '', '', '', '']
         self.dec_csv_writer.writerow([
             f'{time.time():.6f}', f'{self.odom_stamp:.6f}', self.hop_number, int(self.steering_enabled),
             '' if self.path_id is None else f'{self.path_id:.6f}',
-            self._target_index(), len(self.waypoint_list),
+            *decision,
             f'{self.desired_x:.4f}', f'{self.desired_y:.4f}', f'{target_apex:.4f}',
             f'{self.pos_x:.4f}', f'{self.pos_y:.4f}', f'{self.pos_z:.4f}',
             f'{self.vel_x:.4f}', f'{self.vel_y:.4f}', f'{self.vel_z:.4f}',
             f'{self.dvel_x:.4f}', f'{self.dvel_y:.4f}', f'{self.dvel_z:.4f}',
             f'{fall_h:.4f}', f'{fall_time:.4f}', f'{land_vz:.4f}',
-            f'{self.LSE.landing_x:.4f}', f'{self.LSE.landing_y:.4f}',
+            f'{self.LSE.landing_x:.4f}', f'{self.LSE.landing_y:.4f}', *foot,
             *steer,
             f'{self.JHC.nominal_height:.4f}', f'{self.JSTO.powered_climbing_end_timer:.4f}',
         ])
@@ -752,16 +706,17 @@ class hopcopter(Node):
         # control loop freq
         Abs_time = (self.get_clock().now() - self.t0).nanoseconds * 1e-9
 
-        # Trajectory-based goal management - only respond to trajectories, ignore other goals
-        if not self.trajectory_received:
-            # No trajectory received yet - keep robot stationary at current position
-            if self.desired_x is None:  # First time initialization
-                self.desired_x, self.desired_y = self.pos_x, self.pos_y
-                self.desired_yaw = 0.0
-        else:
-            if self.last_waypoint_position is not None:
-                self.desired_x, self.desired_y = self.last_waypoint_position
-                self.desired_yaw = 0.0
+        # Until a path arrives, hop in place where the robot starts
+        if self.desired_x is None:  # First time initialization
+            self.desired_x, self.desired_y = self.pos_x, self.pos_y
+            self.desired_yaw = 0.0
+            self.tracker.hold_xy = (self.pos_x, self.pos_y)
+
+        # A DELETE with no new path after it: drop the path and hop in place
+        if self._delete_time is not None and time.time() - self._delete_time > self.delete_timeout:
+            self._delete_time = None
+            self.tracker.clear()
+            self.get_logger().warn("Path deleted and no new path followed; hopping in place")
 
         self.desired_x_dot, self.desired_y_dot, self.desired_z_dot = 0, 0, 0
 
@@ -793,20 +748,6 @@ class hopcopter(Node):
         X_f = self.Filter_x.filter(self.pos_x) # was self.current_pos.x
         Y_f = self.Filter_y.filter(self.pos_y)
         Z_f = self.Filter_z.filter(self.pos_z)
-
-        # Check if current goal is reached and load next waypoint
-        if self.has_active_goal:
-            # Calculate distance to current goal
-            distance_to_goal = math.sqrt(
-                (X_f - self.desired_x)**2 + 
-                (Y_f - self.desired_y)**2
-            )
-            
-            # Check if goal is reached within tolerance
-            if distance_to_goal < self.current_goal_tolerance:
-                self.goal_reached_count += 1
-                self.get_logger().info(f"Goal reached! Distance: {distance_to_goal:.3f}m")
-                self._load_next_waypoint()
 
         self.Diff_X.step(self.pos_x, time.time()) # was self.current_pos.x
         self.Diff_Y.step(self.pos_y, time.time())
@@ -860,11 +801,16 @@ class hopcopter(Node):
                 self.JSTO.init()
                 if self.JSTO.jumping_state_old == 1 and self.JSTO.jumping_state == 2: # first time landing
                     self.ready_to_drop = False
-                    self.leg_length = Z_f
                     self.JHC.estimate_height(Abs_time)
 
             if self.JSTO.jumping_state_old == 2 and self.JSTO.jumping_state == 3:  # takeoff
                 self.jumping_counter = self.jumping_counter + 1
+
+            # One waypoint decision per real touchdown. A "touchdown" sooner than min_fall_time
+            # after the apex is a false trigger; 3 -> 2 is a landing whose apex was missed.
+            if self.JSTO.jumping_state == 2 and self.JSTO.jumping_state_old in (1, 3):
+                if Abs_time - self._apex_abs_time >= self.min_fall_time:
+                    self._touchdown_since_decision = True
 
             if self.JSTO.jumping_state_old == 1 and self.JSTO.jumping_state == 2:  # landing
                 self.LSE.update_landing_location(X_f, Y_f, Abs_time)
@@ -919,37 +865,36 @@ class hopcopter(Node):
                     self.get_logger().info(
                         f"Warm-up done ({self.hop_number} touchdowns); steering toward goal from this apex")
 
+                self._apex_abs_time = Abs_time
                 jumping_height_record = Z_f - self.leg_length
                 if True:
-                    falling_time = math.sqrt(2 * jumping_height_record / self.G_flight_time_mocap)
+                    falling_time = math.sqrt(2 * max(jumping_height_record, 0.0) / self.G_flight_time_mocap)
                     landing_speed_z = - self.G_flight_time_mocap * falling_time
 
                     self.JHC.update_apex_state(Abs_time, self.Diff_X.data_rate, self.Diff_Y.data_rate)
-                    # Size the next powered climb for the current waypoint's target
-                    # apex (warm-up hops stay in place at the default height)
-                    jhc_target = self.desired_z if self.steering_enabled else self.desired_rel_z
+                    self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
+                                       self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
+                    landing_attitude_z_b = steer_log = None
+                    if self.steering_enabled:
+                        # Decide what the next hop aims at from where this flight lands, and plan
+                        # the landing attitude (stance model) that turns the fall toward it
+                        decision, landing_attitude_z_b, steer_log = self._decide_and_steer(
+                            jumping_height_record, landing_speed_z, gzgt_robot_euler[0], Abs_time)
+                        # The planned apex for that hop; hops in place use the default height
+                        jhc_target = decision.apex if decision.apex is not None else self.desired_rel_z
+                    else:
+                        # Warm-up hop: fall level, in place, at the default height
+                        self.LJC.roll = 0.0
+                        self.LJC.pitch = 0.0
+                        jhc_target = self.desired_rel_z
+
+                    # Size the next powered climb for that apex
+                    self.desired_z = jhc_target
                     self.JSTO.powered_climbing_end_timer = self.JHC.step(jhc_target)
                     self._apex_target_set = jhc_target
 
-                    self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
-                                       self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
-                    landing_attitude_z_b = None
-                    if self.steering_enabled:
-                        self.LJC.set_reference(self.desired_x, self.desired_y, jumping_height_record, ) # set desired x and y
-                        self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z, self.LSE.landing_x, self.LSE.landing_y, ) #keep track of current state in real time
-
-                        # Plan ballistic trajectory
-                        self.LJC.jumping_planning()
-
-                        # Stance phase model - calculate landing attitude and roll/pitch commands
-                        landing_attitude_z_b = self.LJC.inverse_jumping_model(gzgt_robot_euler[0], Abs_time) # calculate landing attitude
-                    else:
-                        # Warm-up hop: fall level, in place
-                        self.LJC.roll = 0.0
-                        self.LJC.pitch = 0.0
-
                     self._log_apex_decision(jhc_target, jumping_height_record, falling_time,
-                                            landing_speed_z, landing_attitude_z_b)
+                                            landing_speed_z, landing_attitude_z_b, steer_log)
 
                 # --- Finalize per-hop row with this arc's takeoff velocity + injection ---
                 if self._pending_hop_row is not None:

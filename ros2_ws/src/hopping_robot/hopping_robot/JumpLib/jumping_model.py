@@ -4,6 +4,15 @@ import time
 from scipy.spatial.transform import Rotation
 from collections import deque
 
+
+def slerp(a, b, s):
+    """Unit vector a fraction s of the way from unit vector a to unit vector b."""
+    theta = math.acos(max(-1.0, min(1.0, float(np.dot(a, b)))))
+    if theta < 1e-9:
+        return np.array(a, dtype=float)
+    return (math.sin((1 - s) * theta) * np.asarray(a) + math.sin(s * theta) * np.asarray(b)) / math.sin(theta)
+
+
 class InPlaneJumpingModel:
     def __init__(self, k1, k2):
         # simplest linear jumping model, the landing velocity does not affect the model,
@@ -168,6 +177,32 @@ class LinearJumpingController:
 
         self.takeoff_velocity = self.takeoff_velocity / np.linalg.norm(self.takeoff_velocity)
 
+    def landing_tilt(self, takeoff_dir):
+        """Landing tilt [rad] the stance model needs to turn this fall into takeoff_dir."""
+        landing_attitude_z_b, _ = self.JM3D.fcn1(self.landing_velocity, takeoff_dir)
+        return math.acos(max(-1.0, min(1.0, landing_attitude_z_b[2])))
+
+    def limit_landing_tilt(self, tilt_max):
+        """Braking tilt guard. If the planned takeoff needs a landing tilt above tilt_max [rad],
+        rotate it toward continuing the arrival (the fall mirrored about the vertical, which
+        needs the least tilt) until the tilt fits; the next hop brakes the rest. Returns the tilt
+        the planned takeoff needed."""
+        tilt_planned = self.landing_tilt(self.takeoff_velocity)
+        if tilt_planned <= tilt_max:
+            return tilt_planned
+        v = self.landing_velocity
+        u_continue = np.array([v[0], v[1], -v[2]]) / np.linalg.norm(v)
+        u_plan = self.takeoff_velocity
+        # bisect on how far to rotate; the tilt shrinks toward u_continue
+        lo, hi = 0.0, 1.0
+        for _ in range(20):
+            mid = 0.5 * (lo + hi)
+            if self.landing_tilt(slerp(u_plan, u_continue, mid)) > tilt_max:
+                lo = mid
+            else:
+                hi = mid
+        self.takeoff_velocity = slerp(u_plan, u_continue, hi)
+        return tilt_planned
 
     def inverse_jumping_model(self, yaw, Abs_time):
         # landing attitude vector

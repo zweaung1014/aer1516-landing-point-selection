@@ -1,6 +1,7 @@
 # Plan: make the controller fly the planner's plan
 
-Status: stage 0 implemented and calibrated 2026-10-29 (results in stage 0); stages 1–4 proposed.
+Status: stages 0 and 1 implemented and tested 2026-10-29 (results in each stage); stages 2–4
+proposed.
 Written 2026-10-29; decisions D1–D6 made the same day. Follows [diagnosis.md](diagnosis.md).
 
 All four problems in the diagnosis come down to one thing: the controller does not fly what the
@@ -224,6 +225,36 @@ overshoot.
   - the WP1 landing is a continuation (< 15°);
   - no landing exceeds 20°.
 - The low_wall detour still needs stages 3–4.
+
+### Stage 1 results (2026-10-29)
+
+Implemented as `WaypointTracker` (`JumpLib/waypoint_tracker.py`) and
+`LinearJumpingController.limit_landing_tilt`. Unit tests in `hopping_robot/test/test_waypoint_tracker.py`
+(17) cover:
+- the guard table;
+- the 10:52 replay: apex 790.42 aims at WP1 with 0.70, and apex 791.23 aims at the goal with
+  1.151;
+- the tilt guard against fcn1's closed form.
+
+Flat-world run (headless, 16:04): goal (4,0), then goal (1.0,1.5) mid-run. The robot flew both
+paths and settled within 1 cm of each goal. It never crashed, against 11 of 14 runs ending at
+WP1 before.
+
+| Check | Result |
+|---|---|
+| Decision before each WP_k landing targets WP_{k+1} | Pass on both paths. No retries, holds or skipped decisions. |
+| No landing above 20° | Pass, max 19.9° (the first goal brake, commanded 17.5°). Little margin, and the guard never fired. |
+| WP1 landing < 15° | Fail: 18.6° on path 1, 15.2° on path 2. Both are continuations. |
+| Foot landing prediction P | 0.021 m median error (max 0.061) against the actual landing; the CoM prediction was 0.105 m. |
+
+Why WP1 exceeds 15°: neither cause is in stage 1's scope.
+- On flat ground the planner planned a dogleg, (−0.05,−0.05) → (2.05,−0.65) → (4.05,0.05), so
+  WP1 needs a 29° heading change. Stage 3's banking candidates should straighten it.
+- LJC picks its own takeoff angle: the 45° "unreachable" fallback on path 1, and a steep 67° on
+  path 2's short hop. Stage 4 flies the planner's α_leg instead.
+
+Open (D4): achieved tilt runs 98–114% of commanded, so a landing capped at 20° commanded can
+reach ~23°. Commanding at most ~18° would keep achieved landings under 20°.
 
 ## Stage 2: deliver the energy (problem 3)
 

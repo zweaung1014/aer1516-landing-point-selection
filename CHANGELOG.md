@@ -38,6 +38,40 @@
   `ballistic_path_*.csv` z now matches the published marker z.
 
 ### Changed
+- **Waypoints advance at the apex, not by distance** (stage 1 of `docs/follow_planner_plan.md`;
+  this and the next six entries). The planner plans exactly one hop per
+  waypoint, and LJC/JHC commit to the next landing and push at the apex. The old 0.4 m distance
+  pop fired around touchdown, so every steered landing aimed at the waypoint the robot was
+  already landing on (the WP1 brake). Diagnosis showed no single tolerance works.
+
+  `WaypointTracker` (`JumpLib/waypoint_tracker.py`) now decides at each steering apex, at most
+  once per real touchdown, from the predicted foot landing point P:
+  - within `reach` 0.8 m (R_far) of the waypoint the flight was aimed at: aim at the next one,
+    with its target apex;
+  - missed it: retry, and after 2 retries hold in place;
+  - on the last waypoint: hop in place at `desired_rel_z`.
+
+  A new path syncs to the waypoint nearest P; if none is within R_far, the robot holds. Waypoints
+  the robot overshot are caught up; a close one is skipped only if P is past it.
+- **Foot landing point.** P is LSE's CoM prediction minus the leg along the planned landing
+  attitude, because waypoints are foot positions. In the stage 1 test it was within 0.02 m
+  (median) of the actual landing, against 0.10 m for the CoM prediction.
+- **A touchdown sooner than 0.15 s after the apex does not count** toward the next decision
+  (false trigger). 3 → 2 counts as a touchdown whose apex was missed.
+- **DELETE no longer clears the path.** The planner sends DELETE right before every ADD, so the
+  robot keeps flying the current path. It drops the path only if no ADD follows within 0.5 s.
+- **Touchdown height and fall-time gravity.** `leg_length` was the filtered z at the first
+  touchdown, 0.420 m. The touchdown CoM height is 0.366 m (stage 0 measured 0.367). Fall times
+  now use g′ 9.55 (stage 0, level falls) instead of 9.8. Together these made LSE predict
+  steered landings ~0.1 m short and made the predicted landing too shallow (braking commands
+  ~1.6° too steep).
+- **Braking tilt guard** (D4, τ_max 20°): `LinearJumpingController.limit_landing_tilt` rotates a
+  takeoff whose landing would need more than 20° of tilt toward continuing the arrival (the fall
+  mirrored about the vertical), so a brake is spread over two hops. Today's controller tracks
+  95–117% of the commanded tilt, so a capped landing can still reach ~23°.
+- **Apex-decision CSV columns**: `decided`, `mode`, `land_idx` (the waypoint this flight was
+  aimed at), `target_idx`, `retries`, `foot_land_x/y`, `planned_tilt_deg`, `tilt_capped`.
+  These replace `wp_remaining` and the nearest-match `target_idx`.
 - **`ballistic_motion_planner` builds Release by default**: `CMakeLists.txt` sets
   `CMAKE_BUILD_TYPE=Release` when none is given; it was empty, i.e. unoptimized. The A* ran
   about 3× slower that way (one low_wall goal: 10.6 s vs 3.1 s). `ballistic_parity_test` output
@@ -71,6 +105,13 @@
   in both the ROS parameter default (`ballistic_planner_node.cpp`) and the `PlannerParams`
   struct default (`hopping_astar.hpp`); `parity_main.cpp` keeps 1.0 m to stay in lock-step with
   the Python reference. `validate_params` still passes (first-hop tan floor 0.833 < ceiling 1.0).
+
+### Removed
+- `hopcopter`: the distance pop (`current_goal_tolerance`), `_load_next_waypoint`, the
+  `waypoint_list` queue, `apply_follower_gating` and the `/trajectory_start_position`
+  subscription. The gating never used the start position; it ran on the first plan in only 2 of
+  9 runs, because that topic arrives after the marker, and it dropped points on turning paths.
+  Also removed: `pending_new_traj`, which was written but never read.
 
 ## [3.0.0] - 2026-09-07 - Ballistic A* Is the Only Planner
 

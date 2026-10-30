@@ -21,6 +21,7 @@ from functools import partial
 from sensor_msgs.msg import Imu
 from visualization_msgs.msg import Marker
 from grid_map_msgs.msg import GridMap
+from hopcopter_msgs.msg import HopPlan
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
 
@@ -40,6 +41,7 @@ from hopping_robot.JumpLib.jumping_model import LinearJumpingController
 from hopping_robot.JumpLib.jumping_model import InPlaneJumpingModel
 from hopping_robot.JumpLib.waypoint_tracker import WaypointTracker
 from hopping_robot.JumpLib.push_controller import PushController, push_accel
+from hopping_robot.JumpLib.takeoff_solver import HopModel, clearance_apex, dilate, tilt_of, unit
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
 
@@ -186,6 +188,29 @@ class hopcopter(Node):
         # Braking tilt guard (D4): never command a landing tilt above this
         self.landing_tilt_max = math.radians(20.0)
 
+        # Each hop's takeoff is re-solved at the apex before its landing, from the predicted touchdown
+        # and arrival (stage 4). The model's constants are the ones stages 0-4 measured; see
+        # JumpLib/takeoff_solver.py. HopPlan, the planner's own takeoff and landing for each hop, is
+        # what the commanded ones are logged against.
+        self.hop_model = HopModel(leg=self.leg_length, g_up=self.G_flight_time_mocap,
+                                  g_down=self.G_flight_time_mocap)
+        # Zero thrust for one tick at each apex: the firmware resets its attitude PIDs at zero
+        # thrust, and the integrators wind up while the idle motors cannot level the body after a
+        # short push. Wound up, they overshot the landing attitude by ~1-1.5 deg on continuing hops.
+        self._reset_attitude_pid = False
+        self.hop_plan = None          # latest HopPlan
+        self.path_plan = None         # the HopPlan of the current path (same stamp as its marker)
+        # Clearance re-check: the planner's test (the arc min_clearance above terrain dilated by
+        # robot_radius + min_clearance) for each hop from where the robot actually lands. A hop
+        # that fails it flies at the least apex that passes, plus apex_clear_margin (planned hops
+        # over a wall sit exactly on that apex), unless that is more than apex_raise_max higher.
+        self.min_clearance = 0.3      # the planner's min_clearance (D3)
+        self.robot_radius = 0.03
+        self.apex_clear_margin = 0.01
+        self.apex_raise_max = 0.3
+        # A hop the leg cannot fly (leg angle under 40 deg) hops in place first, at most this high
+        self.pump_apex_max = 1.5
+
         # Initialize desired positions as None until the first tick
         self.desired_x = None
         self.desired_y = None
@@ -210,6 +235,9 @@ class hopcopter(Node):
         self._emap_ncols = 0         # cells along y
         self._emap_outer_start = 0
         self._emap_inner_start = 0
+        # The map as grid[ix, iy] (x, y increasing), dilated for the clearance re-check
+        self._emap_field = None
+        self._emap_origin = (0.0, 0.0)  # lower corner of cell (0, 0)
 
         # Subscribe to trajectory from the ballistic motion planner
         # (Marker id=400 contract)
@@ -217,6 +245,13 @@ class hopcopter(Node):
             Marker,
             '/ballistic_trajectory',
             self.trajectory_callback,
+            10
+        )
+        # Each hop's planned takeoff and landing, published just before the marker pair
+        self.hop_plan_sub = self.create_subscription(
+            HopPlan,
+            '/ballistic_hop_plan',
+            self.hop_plan_callback,
             10
         )
 
@@ -266,7 +301,7 @@ class hopcopter(Node):
         self.push = PushController(push_accel(self.powered_climbing_thrust, self.hop_mass), z_lo=self.leg_length,
                                    g_coast=self.G_flight_time_mocap, t_lead=0.026, t_max=0.4, v_min=1.0)
         self._push_on = False
-        self.IPJM = InPlaneJumpingModel(1.688, 2.469)
+        self.IPJM = InPlaneJumpingModel(self.hop_model.k1, self.hop_model.k2)
         self.LJC = LinearJumpingController(high_ballistic_enable = True, model=self.IPJM, g = self.G, normal_gain=1)
         self.TJ = trajectory(reverse_R=1.1)
 
@@ -355,17 +390,34 @@ class hopcopter(Node):
         self.dec_csv_writer.writerow([
             'timestamp', 'odom_stamp', 'hop_number', 'steering',
             # decided: 1 if this apex made a decision (0: no real touchdown since the last one);
-            # land_idx: waypoint this flight was aimed at; target_idx: what the next hop aims at
+            # land_idx: waypoint this flight was aimed at; target_idx: what the next hop aims at;
+            # target_apex: what the next push aims at, above the takeoff ground
             'path_id', 'decided', 'mode', 'land_idx', 'target_idx', 'retries',
             'target_x', 'target_y', 'target_apex',
             'apex_x', 'apex_y', 'apex_z',
             'odom_vx', 'odom_vy', 'odom_vz',
             'diff_vx', 'diff_vy', 'diff_vz',
+            # this fall's predicted touchdown: CoM, foot, and the arrival velocity (world frame)
             'fall_h', 'fall_time', 'land_vz',
             'pred_land_x', 'pred_land_y', 'foot_land_x', 'foot_land_y',
-            'takeoff_heading_deg', 'takeoff_elev_deg', 'unreachable',
-            'cmd_roll_deg', 'cmd_pitch_deg', 'cmd_tilt_deg', 'planned_tilt_deg', 'tilt_capped',
-            'theta_v_deg',
+            'v_in_x', 'v_in_y', 'v_in_z',
+            # the next takeoff (JumpLib/takeoff_solver.py): how it was solved, the leg launch it
+            # needs, and the one commanded after the tilt guard (heading, elevation)
+            'solve', 'alpha_leg_deg', 'v_leg', 'v_h_leg', 'apex_raise',
+            'takeoff_heading_deg', 'takeoff_elev_deg',
+            # the landing attitude commanded for it, and the tilt the unguarded takeoff needed
+            'cmd_roll_deg', 'cmd_pitch_deg', 'cmd_tilt_deg', 'tilt_needed_deg', 'tilt_capped',
+            'theta_v_deg', 'cmd_axis_x', 'cmd_axis_y', 'cmd_axis_z',
+            # what the model expects of the commanded hop: push, climb and fall times, the push's
+            # horizontal kick [m, m/s], the stance's CoM shift [m], the liftoff tilt, and the next
+            # foot touchdown
+            'pred_t_push', 'pred_t_up', 'pred_t_down', 'pred_kick', 'pred_kick_v', 'pred_lift_dx',
+            'pred_lift_tilt_deg', 'pred_next_x', 'pred_next_y',
+            # the plan for this landing (where this flight was aimed; HopPlan's arrival and landing
+            # attitude there) and for the next hop (HopPlan's takeoff); empty without a HopPlan
+            'plan_land_x', 'plan_land_y', 'plan_v_in_x', 'plan_v_in_y', 'plan_v_in_z',
+            'plan_axis_x', 'plan_axis_y', 'plan_axis_z', 'plan_tilt_deg',
+            'plan_heading_deg', 'plan_alpha_leg_deg', 'plan_v_h', 'plan_apex',
             # the climb that just ended: its target and the apex reached, both above the liftoff
             # CoM height; how its push ended and lasted; the state at the tick that ended it
             'climb_target', 'climb_apex', 'push_end', 'push_s', 'cut_h', 'cut_vz', 'cut_cos_tilt',
@@ -487,6 +539,14 @@ class hopcopter(Node):
             self._emap_outer_start = msg.outer_start_index
             self._emap_inner_start = msg.inner_start_index
             self._emap_data = np.asarray(arr.data, dtype=np.float64)
+            # grid[ix, iy] with x and y increasing: grid_map's row ru = nrows - 1 - ix, col
+            # cu = ncols - 1 - iy, both stored circularly from the start indices
+            rb = (np.arange(nrows) + msg.inner_start_index) % nrows
+            cb = (np.arange(ncols) + msg.outer_start_index) % ncols
+            grid = self._emap_data.reshape(ncols, nrows)[np.ix_(cb, rb)].T[::-1, ::-1]
+            self._emap_field = dilate(grid, self._emap_res, self.robot_radius + self.min_clearance)
+            self._emap_origin = (self._emap_cx - 0.5 * nrows * self._emap_res,
+                                 self._emap_cy - 0.5 * ncols * self._emap_res)
         except Exception as e:
             self.get_logger().error(f"Error in elevation_map_callback: {e}")
 
@@ -531,6 +591,10 @@ class hopcopter(Node):
                     # flight lands, so points behind the robot need no filtering here.
                     self.tracker.set_path([(p.x, p.y, p.z) for p in msg.points])
                     self._delete_time = None
+                    # Its HopPlan carries the same stamp; it usually arrives first
+                    self.path_plan = None
+                    if self.hop_plan is not None:
+                        self.hop_plan_callback(self.hop_plan)
                     self.get_logger().info(
                         "New path: " + " -> ".join(f"({p.x:.2f}, {p.y:.2f})" for p in msg.points))
                 else:
@@ -549,6 +613,16 @@ class hopcopter(Node):
 
         except Exception as e:
             self.get_logger().error(f"Error in trajectory_callback: {e}")
+
+    def hop_plan_callback(self, msg: HopPlan) -> None:
+        """Keep the latest HopPlan, and attach it to the current path when the stamps match."""
+        self.hop_plan = msg
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if (self.path_id is not None and abs(stamp - self.path_id) < 1e-6
+                and len(msg.hops) == len(self.tracker.path) - 1):
+            if self.path_plan is not msg:
+                self.get_logger().info(f"HopPlan for this path: {len(msg.hops)} hops")
+            self.path_plan = msg
 
     def motorPower(self, msg):
         """
@@ -599,35 +673,109 @@ class hopcopter(Node):
                 self.get_logger().info(f'desired_rel_z set to {p.value:.3f} m')
         return SetParametersResult(successful=True)
 
-    def _steer(self, aim_x, aim_y, fall_h, landing_speed_z, yaw, abs_time):
-        """Plan this fall's landing attitude so that the next takeoff heads for (aim_x, aim_y),
-        under the braking tilt guard. Returns the landing attitude (body z axis, world frame)
-        and the tilt the unguarded plan needed."""
-        self.LJC.set_reference(aim_x, aim_y, fall_h)
-        self.LJC.update_landing_state(self.vel_x, self.vel_y, landing_speed_z,
-                                      self.LSE.landing_x, self.LSE.landing_y)
-        self.LJC.jumping_planning()
-        tilt_planned = self.LJC.limit_landing_tilt(self.landing_tilt_max)
-        return self.LJC.inverse_jumping_model(yaw, abs_time), tilt_planned
+    def _world_velocity(self):
+        """The odom twist rotated into the world frame (stage 0: it is body frame)."""
+        R = Rotation.from_quat([self.ori_x, self.ori_y, self.ori_z, self.ori_w])
+        return R.apply([self.vel_x, self.vel_y, self.vel_z])
 
-    def _decide_and_steer(self, fall_h, landing_speed_z, yaw, abs_time):
-        """At a steering apex: decide what the next hop aims at from where this flight will
-        land, then plan the landing attitude toward it. Returns the decision, the landing
-        attitude and what the decision log needs."""
+    def _predict_touchdown(self, z, v, tilt, abs_time):
+        """The current fall's touchdown, from the CoM at height z moving at world velocity v: it
+        falls to the leg's height over the ground below, tilted to the landing tilt [rad], at the
+        g' of a fall steered to that tilt. Returns the CoM touchdown (x, y), the fall height and
+        time, the arrival velocity and the ground height there."""
+        g_fall = self.hop_model.fall_g(tilt)
+        w = max(-v[2], 0.0)                      # the apex is detected a tick after it
+        ground = self._ground_elevation_at(self.pos_x, self.pos_y)
+        for _ in range(2):                       # the ground under where it lands
+            h = max(z - ground - self.leg_length * math.cos(tilt), 0.0)
+            t = (math.sqrt(w * w + 2.0 * g_fall * h) - w) / g_fall
+            self.LSE.estimation_now(v[0], v[1], t, self.pos_x, self.pos_y, abs_time)
+            ground = self._ground_elevation_at(self.LSE.landing_x, self.LSE.landing_y)
+        com = np.array([self.LSE.landing_x, self.LSE.landing_y])
+        return com, h, t, np.array([v[0], v[1], -(w + g_fall * t)]), ground
+
+    def _lookahead_axis(self, j, v_land):
+        """The body z axis expected at the touchdown on waypoint j, which sets where the foot lands
+        relative to the CoM: the stance that turns the arrival v_land into the takeoff toward
+        waypoint j + 1 (straight up at the last waypoint, which stops), under the tilt guard. That
+        takeoff is estimated as a ballistic hop; its corrections move the axis by under a degree."""
+        m = self.hop_model
+        path = self.tracker.path
+        if j + 1 < len(path):
+            (x0, y0, _), (x1, y1, h1) = path[j], path[j + 1]
+            dz = self._ground_elevation_at(x1, y1) - self._ground_elevation_at(x0, y0)
+            t = math.sqrt(2.0 * h1 / m.g_up) + math.sqrt(2.0 * max(h1 - dz, 0.01) / m.g_down)
+            v_leg = math.sqrt(m.eta) * float(np.linalg.norm(v_land))
+            c = min(math.hypot(x1 - x0, y1 - y0) / t / v_leg, math.cos(m.alpha_min))
+            d_out = unit(math.atan2(y1 - y0, x1 - x0), math.acos(c))
+        else:
+            d_out = np.array([0.0, 0.0, 1.0])
+        d_out, _ = m.limit_tilt(v_land, d_out, self.landing_tilt_max)
+        return m.stance(v_land, d_out)[0]
+
+    def _solve_hop(self, d, foot, v_in, ground_p):
+        """The next takeoff for decision d, from a foot touchdown at foot arriving at v_in.
+
+        track/retry hops go to their waypoint at its target apex, re-checked for clearance from
+        where the robot actually lands; goal/hold/idle hop in place at desired_rel_z. A hop the
+        leg cannot fly, or one whose apex cannot clear the terrain, hops in place instead (the
+        tracker then retries it, and holds after max_retries). The commanded takeoff then passes
+        the braking tilt guard. Returns a dict for the command and the log."""
+        m = self.hop_model
+        up = np.array([0.0, 0.0, 1.0])
+        if d.mode in ('track', 'retry'):
+            x, y, h = self.tracker.path[d.land]
+            target, j = np.array([x, y]), d.land
+        else:
+            target, h, j = np.array([d.aim_x, d.aim_y]), self.desired_rel_z, None
+        dz = self._ground_elevation_at(*target) - ground_p
+        # The foot lands off the CoM along the next landing attitude, which depends on the arrival
+        # there: solve, look ahead, solve again
+        z_next = up
+        f = m.solve(foot, v_in, target, h, dz, z_next)
+        if f.mode != 'pump' and j is not None:
+            z_next = self._lookahead_axis(j, f.v_land)
+            f = m.solve(foot, v_in, target, h, dz, z_next)
+        raised = 0.0
+        if f.mode != 'pump' and j is not None and self._emap_field is not None:
+            need = clearance_apex(self._emap_field, self._emap_origin, self._emap_res, foot, target,
+                                  ground_p, ground_p + dz, self.min_clearance)
+            if need > f.apex:
+                raised = need + self.apex_clear_margin - h
+                if raised > self.apex_raise_max:
+                    f.mode, f.v_h_need = 'blocked', None
+                else:
+                    f = m.solve(foot, v_in, target, h + raised, dz, z_next)
+        solve = f.mode
+        if f.mode in ('pump', 'blocked'):
+            # Hop in place, high enough that the leg can fly the hop from the next landing
+            h_in = m.pump_height(f.v_h_need) + 0.05 if f.v_h_need else h
+            h = min(max(h_in, self.desired_rel_z), self.pump_apex_max)
+            raised, target, dz, z_next = 0.0, foot, 0.0, up
+            f = m.solve(foot, v_in, target, h, dz, z_next)
+        d_cmd, tilt_needed = m.limit_tilt(v_in, f.d_out, self.landing_tilt_max)
+        f_cmd = f if tilt_needed <= self.landing_tilt_max else m.forward(foot, v_in, d_cmd, h + raised, dz, z_next)
+        z_land, _, theta_v = m.stance(v_in, d_cmd)
+        return {'f': f, 'f_cmd': f_cmd if f_cmd is not None else f, 'd_cmd': d_cmd,
+                'z_land': z_land, 'theta_v': theta_v, 'tilt_needed': tilt_needed, 'apex': h + raised,
+                'raised': raised, 'solve': solve, 'ground': ground_p}
+
+    def _decide_and_steer(self, z_apex, v, yaw, abs_time):
+        """At a steering apex: decide what the next hop aims at from where this flight will land,
+        solve its takeoff, and command the landing attitude that launches it. The touchdown
+        depends on the landing attitude (the foot lands off the CoM along it, and the fall's g'
+        depends on its tilt), so decide and solve twice. Returns the decision and the log."""
         land_before = self.tracker.land
-        p_com = (self.LSE.landing_x, self.LSE.landing_y)
         decided = self._touchdown_since_decision or self._decision is None
+        z_land = np.array([0.0, 0.0, 1.0])
+        for _ in range(2):
+            com, fall_h, fall_t, v_in, ground_p = self._predict_touchdown(z_apex, v, tilt_of(z_land),
+                                                                          abs_time)
+            foot = com - self.leg_length * z_land[:2]
+            d = self.tracker.decide(*foot) if decided else self._decision
+            hop = self._solve_hop(d, foot, v_in, ground_p)
+            z_land = hop['z_land']
         if decided:
-            d = self.tracker.decide(*p_com)
-            z_b, tilt_planned = self._steer(d.aim_x, d.aim_y, fall_h, landing_speed_z, yaw, abs_time)
-            # Waypoints are foot positions, and the foot lands away from the CoM along the
-            # landing tilt: decide again from the foot, and re-plan if the aim changes
-            foot = (p_com[0] - self.leg_length * z_b[0], p_com[1] - self.leg_length * z_b[1])
-            d_foot = self.tracker.decide(*foot)
-            if (d_foot.mode, d_foot.land, d_foot.aim_x, d_foot.aim_y) != (d.mode, d.land, d.aim_x, d.aim_y):
-                z_b, tilt_planned = self._steer(d_foot.aim_x, d_foot.aim_y, fall_h, landing_speed_z,
-                                                yaw, abs_time)
-            d = d_foot
             prev = self._decision
             self.tracker.apply(d)
             self._decision = d
@@ -642,57 +790,100 @@ class hopcopter(Node):
                     self.get_logger().warn(msg)
                 else:
                     self.get_logger().info(msg)
-        else:
-            # No real touchdown since the last decision (a false trigger): keep its aim
-            d = self._decision
-            z_b, tilt_planned = self._steer(d.aim_x, d.aim_y, fall_h, landing_speed_z, yaw, abs_time)
-            foot = (p_com[0] - self.leg_length * z_b[0], p_com[1] - self.leg_length * z_b[1])
+        if hop['solve'] in ('pump', 'blocked', 'capped') or hop['raised'] > 0.0:
+            self.get_logger().warn(
+                f"Hop to ({d.aim_x:.2f}, {d.aim_y:.2f}): {hop['solve']}"
+                + (f", apex raised {hop['raised']:.2f} for clearance" if hop['raised'] > 0.0 else "")
+                + (f", hopping in place to {hop['apex']:.2f}" if hop['solve'] in ('pump', 'blocked') else ""))
+        # Command the landing attitude that turns the arrival into the commanded leg takeoff, as
+        # roll and pitch in the yaw frame (LinearJumpingController.inverse_jumping_model's convention)
+        v_b = Rotation.from_rotvec(yaw * np.array([0.0, 0.0, -1.0])).apply(hop['z_land'])
+        roll = -math.asin(self.saturation(v_b[1], 1.0, -1.0))
+        self.LJC.roll = math.degrees(roll)
+        self.LJC.pitch = math.degrees(math.asin(self.saturation(v_b[0] / math.cos(roll), 1.0, -1.0)))
         self.desired_x, self.desired_y = d.aim_x, d.aim_y
-        return d, z_b, {'decided': decided, 'land_before': land_before, 'foot': foot,
-                        'tilt_planned': tilt_planned}
+        hop.update({'decided': decided, 'land_before': land_before, 'foot': foot, 'fall_h': fall_h,
+                    'fall_t': fall_t, 'v_in': v_in})
+        return d, hop
 
-    def _log_apex_decision(self, target_apex, fall_h, fall_time, land_vz, landing_attitude_z_b,
-                           steer_log, climb, climb_apex):
-        """One row per apex: the state the controller acted on and what it commanded.
-        landing_attitude_z_b and steer_log are None on warm-up apexes, which do not steer;
-        climb is None when no push was armed in the climb that just ended."""
-        if landing_attitude_z_b is not None:
+    def _plan_values(self, k, j):
+        """From the current path's HopPlan: the planned arrival and landing attitude at waypoint k
+        (this landing; the start for k = 0) and the planned takeoff of the hop landing on waypoint
+        j (the next one). Empty strings where there is no plan."""
+        out = [''] * 13
+        plan = self.path_plan
+        path = self.tracker.path
+        if k is not None and k < len(path):
+            out[0:2] = [f'{path[k][0]:.4f}', f'{path[k][1]:.4f}']
+        if plan is None:
+            return out
+        if k is not None and 0 <= k <= len(plan.hops):
+            if k == 0:
+                v, a, tilt = (0.0, 0.0, -plan.start_speed), plan.start_axis, plan.start_tilt
+            else:
+                h = plan.hops[k - 1]
+                v = (h.arrival_velocity.x, h.arrival_velocity.y, h.arrival_velocity.z)
+                a, tilt = h.landing_axis, h.landing_tilt
+            out[2:9] = [f'{v[0]:.4f}', f'{v[1]:.4f}', f'{v[2]:.4f}',
+                        f'{a.x:.4f}', f'{a.y:.4f}', f'{a.z:.4f}', f'{math.degrees(tilt):.3f}']
+        if j is not None and 1 <= j <= len(plan.hops):
+            h = plan.hops[j - 1]
+            out[9:13] = [f'{math.degrees(h.heading):.3f}', f'{math.degrees(h.alpha_leg):.3f}',
+                         f'{h.v_h:.4f}', f'{h.target_apex:.4f}']
+        return out
+
+    def _log_apex_decision(self, target_apex, fall, hop, climb, climb_apex):
+        """One row per apex: the state the controller acted on and what it commanded. fall is
+        (height, time, arrival velocity) of the predicted touchdown; hop is None on warm-up apexes,
+        which do not steer; climb is None when no push was armed in the climb that just ended."""
+        fall_h, fall_t, v_in = fall
+        f4 = lambda x: f'{x:.4f}'  # noqa: E731
+        if hop is not None:
             d = self._decision
-            tv = self.LJC.takeoff_velocity  # unit takeoff direction handed to the stance model
+            f, fc, dc = hop['f'], hop['f_cmd'], hop['d_cmd']
             idx = lambda k: '' if k is None else k  # noqa: E731
-            decision = [int(steer_log['decided']), d.mode, idx(steer_log['land_before']),
-                        idx(d.land), d.retries]
-            foot = [f'{steer_log["foot"][0]:.4f}', f'{steer_log["foot"][1]:.4f}']
+            decision = [int(hop['decided']), d.mode, idx(hop['land_before']), idx(d.land), d.retries]
+            foot = [f4(hop['foot'][0]), f4(hop['foot'][1])]
+            za = hop['z_land']
             steer = [
-                f'{math.degrees(math.atan2(tv[1], tv[0])):.3f}',
-                f'{math.degrees(math.asin(self.saturation(tv[2], 1.0, -1.0))):.3f}',
-                int(self.LJC.norm_d > self.LJC.norm_d_max),
-                f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}',
-                f'{math.degrees(math.acos(self.saturation(landing_attitude_z_b[2], 1.0, -1.0))):.3f}',
-                f'{math.degrees(steer_log["tilt_planned"]):.3f}',
-                int(steer_log['tilt_planned'] > self.landing_tilt_max),
-                f'{math.degrees(self.IPJM.theta_v):.3f}',
+                hop['solve'], f'{math.degrees(f.alpha_leg):.3f}', f4(f.v_leg), f4(f.v_h),
+                f4(hop['raised']),
+                f'{math.degrees(math.atan2(dc[1], dc[0])):.3f}',
+                f'{math.degrees(math.asin(self.saturation(dc[2], 1.0, -1.0))):.3f}',
+                f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}', f'{math.degrees(tilt_of(za)):.3f}',
+                f'{math.degrees(hop["tilt_needed"]):.3f}', int(hop['tilt_needed'] > self.landing_tilt_max),
+                f'{math.degrees(hop["theta_v"]):.3f}', f4(za[0]), f4(za[1]), f4(za[2]),
+                f4(fc.t_push), f4(fc.t_up), f4(fc.t_down), f4(float(np.linalg.norm(fc.kick_x))),
+                f4(float(np.linalg.norm(fc.kick_v))), f4(float(np.linalg.norm(fc.lift_dx))),
+                f'{math.degrees(tilt_of(fc.z_lift)):.3f}', f4(fc.land[0]), f4(fc.land[1]),
             ]
+            k = hop['land_before']
+            if k is None and self.tracker.path:
+                k = 0                    # the first steered landing of a path is on its start
+            plan = self._plan_values(k, d.land if d.mode in ('track', 'retry') else None)
         else:
             decision = ['', 'warmup', '', '', '']
             foot = ['', '']
-            steer = ['', '', '', f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}', '', '', '', '']
+            steer = ['warmup', '', '', '', '', '', '', f'{self.LJC.roll:.3f}', f'{self.LJC.pitch:.3f}'] + [''] * 16
+            plan = [''] * 13
         if climb is None:
-            push = ['', f'{climb_apex:.4f}', 'unarmed', '', '', '', '']
+            push = ['', f4(climb_apex), 'unarmed', '', '', '', '']
         else:
-            push = [f'{climb.target:.4f}', f'{climb_apex:.4f}', climb.end, f'{climb.duration:.4f}',
-                    f'{climb.cut_h:.4f}', f'{climb.cut_v:.4f}', f'{climb.cut_cos:.4f}']
+            push = [f4(climb.target), f4(climb_apex), climb.end, f4(climb.duration),
+                    f4(climb.cut_h), f4(climb.cut_v), f4(climb.cut_cos)]
         self.dec_csv_writer.writerow([
             f'{time.time():.6f}', f'{self.odom_stamp:.6f}', self.hop_number, int(self.steering_enabled),
             '' if self.path_id is None else f'{self.path_id:.6f}',
             *decision,
-            f'{self.desired_x:.4f}', f'{self.desired_y:.4f}', f'{target_apex:.4f}',
-            f'{self.pos_x:.4f}', f'{self.pos_y:.4f}', f'{self.pos_z:.4f}',
-            f'{self.vel_x:.4f}', f'{self.vel_y:.4f}', f'{self.vel_z:.4f}',
-            f'{self.dvel_x:.4f}', f'{self.dvel_y:.4f}', f'{self.dvel_z:.4f}',
-            f'{fall_h:.4f}', f'{fall_time:.4f}', f'{land_vz:.4f}',
-            f'{self.LSE.landing_x:.4f}', f'{self.LSE.landing_y:.4f}', *foot,
+            f4(self.desired_x), f4(self.desired_y), f4(target_apex),
+            f4(self.pos_x), f4(self.pos_y), f4(self.pos_z),
+            f4(self.vel_x), f4(self.vel_y), f4(self.vel_z),
+            f4(self.dvel_x), f4(self.dvel_y), f4(self.dvel_z),
+            f4(fall_h), f4(fall_t), f4(v_in[2]),
+            f4(self.LSE.landing_x), f4(self.LSE.landing_y), *foot,
+            f4(v_in[0]), f4(v_in[1]), f4(v_in[2]),
             *steer,
+            *plan,
             *push,
         ])
         self.dec_csv_file.flush()
@@ -889,37 +1080,31 @@ class hopcopter(Node):
                         f"Warm-up done ({self.hop_number} touchdowns); steering toward goal from this apex")
 
                 self._apex_abs_time = Abs_time
-                jumping_height_record = Z_f - self.leg_length
+                self._reset_attitude_pid = True
                 # The climb that just ended: its push, and the apex it reached
                 climb = self.push.pop_climb()
                 climb_apex = self._arc_max_z - self.push.z_lo
-                if True:
-                    falling_time = math.sqrt(2 * max(jumping_height_record, 0.0) / self.G_flight_time_mocap)
-                    landing_speed_z = - self.G_flight_time_mocap * falling_time
+                v_world = self._world_velocity()
+                if self.steering_enabled:
+                    # Decide what the next hop aims at from where this flight lands, solve its
+                    # takeoff, and command the landing attitude that launches it
+                    _, hop = self._decide_and_steer(Z_f, v_world, gzgt_robot_euler[0], Abs_time)
+                    target_apex, ground = hop['apex'], hop['ground']
+                    fall = (hop['fall_h'], hop['fall_t'], hop['v_in'])
+                else:
+                    # Warm-up hop: fall level, in place, at the default height
+                    hop = None
+                    _, fall_h, fall_t, v_in, ground = self._predict_touchdown(Z_f, v_world, 0.0, Abs_time)
+                    fall = (fall_h, fall_t, v_in)
+                    self.LJC.roll = 0.0
+                    self.LJC.pitch = 0.0
+                    target_apex = self.desired_rel_z
 
-                    self.LSE.estimation_now(self.vel_x, self.vel_y, falling_time,
-                                       self.pos_x, self.pos_y, Abs_time) # predict landing state (x,y)
-                    landing_attitude_z_b = steer_log = None
-                    if self.steering_enabled:
-                        # Decide what the next hop aims at from where this flight lands, and plan
-                        # the landing attitude (stance model) that turns the fall toward it
-                        decision, landing_attitude_z_b, steer_log = self._decide_and_steer(
-                            jumping_height_record, landing_speed_z, gzgt_robot_euler[0], Abs_time)
-                        # The planned apex for that hop; hops in place use the default height
-                        target_apex = decision.apex if decision.apex is not None else self.desired_rel_z
-                    else:
-                        # Warm-up hop: fall level, in place, at the default height
-                        self.LJC.roll = 0.0
-                        self.LJC.pitch = 0.0
-                        target_apex = self.desired_rel_z
+                # The next climb's push aims at that apex, above the ground it takes off from
+                self.desired_z = target_apex + ground
+                self._apex_target_set = target_apex
 
-                    # The next climb's push aims at that apex
-                    self.desired_z = target_apex
-                    self._apex_target_set = target_apex
-
-                    self._log_apex_decision(target_apex, jumping_height_record, falling_time,
-                                            landing_speed_z, landing_attitude_z_b, steer_log,
-                                            climb, climb_apex)
+                self._log_apex_decision(target_apex, fall, hop, climb, climb_apex)
 
                 # --- Finalize per-hop row with this arc's takeoff velocity + injection ---
                 if self._pending_hop_row is not None:
@@ -943,6 +1128,9 @@ class hopcopter(Node):
                 if self.JSTO.jumping_state == 1:
                     self.condition_log.append("1")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = self.LJC.roll, self.LJC.pitch, self.desired_yaw, 1000 #- power_falling_thrust  # unpowered falling
+                    if self._reset_attitude_pid:
+                        thrust_flight = 0     # resets the firmware's attitude PIDs (see __init__)
+                        self._reset_attitude_pid = False
                 elif self.JSTO.jumping_state == 2:
                     self.condition_log.append("2")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, self.desired_yaw,  1000 # stance, unpowered swing

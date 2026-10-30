@@ -225,6 +225,7 @@ def main():
     # ── g' and touchdown velocities, per flight ──
     g_fit, g_model, g_tilt, flights, rejected = [], [], [], [], 0
     flight_g = []    # g' per flight, aligned with flights (None when not fitted)
+    flight_td = []   # CoM position at touchdown, from the same fit
     for k in range(len(stances)):
         td = stances[k][0]
         if k == 0:
@@ -238,6 +239,7 @@ def main():
         if np.sum(sel) < 10 or t_b - t_a < 0.12:
             flights.append(None)
             flight_g.append(None)
+            flight_td.append(None)
             continue
         tt = od_t[sel] - t_td(stances[k])
         cz = np.polyfit(tt, od_p[sel, 2], 2)
@@ -248,6 +250,7 @@ def main():
         if not 7.0 < -2.0 * cz[0] < 12.0 or np.sqrt(np.mean(resid ** 2)) > 0.005:
             flights.append(None)
             flight_g.append(None)
+            flight_td.append(None)
             rejected += 1
             continue
         g_fit.append(-2.0 * cz[0])
@@ -258,6 +261,7 @@ def main():
         # velocity at touchdown, from the fit (unpowered all the way down)
         flights.append(np.array([cx[1], cy[1], cz[1]]))
         flight_g.append(-2.0 * cz[0])
+        flight_td.append(np.array([cx[2], cy[2], cz[2]]))
 
     print("\n== g' (unpowered flight, quadratic fit of z on sim time)")
     print(f"  fitted:          {stats(g_fit)}   ({rejected} non-ballistic segments rejected)")
@@ -273,6 +277,7 @@ def main():
           f"{'tilt_td':>7} {'redir':>6} {'v_h_td':>6} {'v_h_lo':>6} {'stance_s':>8}")
     etas, rows_out = [], []
     lo_vel = {}      # stance index -> (liftoff time, liftoff velocity)
+    lo_pos = {}      # stance index -> CoM position at liftoff
     for k, s in enumerate(stances):
         tl = t_lo(s)
         cand = np.flatnonzero(od_t >= t_imu[s[1]] + ODOM_DT)
@@ -286,6 +291,7 @@ def main():
         a_z = az[tick] * cos_tilt[tick] - G      # IMU says how much thrust is already on
         v_lo[2] -= a_z * (od_t[j] - 0.5 * ODOM_DT - tl)
         lo_vel[k] = (tl, v_lo)
+        lo_pos[k] = od_p[j] - v_lo * (od_t[j] - tl)
         v_td = flights[k]
         if v_td is None:
             continue
@@ -488,6 +494,85 @@ def main():
     else:
         print("  no pushes after a steered landing")
 
+    # ── Stage 4: each steered hop against the takeoff solve and the plan ──
+    if dec is not None and "solve" in dec.columns:
+        print("\n== Takeoff solve (stage 4): each steered hop against the model and the plan")
+        td_t = np.array([t_td(s) for s in stances])
+        body_z = lambda i: rot_zyx(yaw[i], pitch[i], roll[i])[:, 2]  # noqa: E731
+
+        def angle(a, b):
+            return np.degrees(np.arccos(np.clip(a @ b / np.linalg.norm(a) / np.linalg.norm(b), -1, 1)))
+
+        hops = []
+        dec_s = dec[(dec.steering == 1) & dec.solve.notna() & (dec.solve != "warmup")]
+        for r, d in dec_s.iterrows():
+            k = int(np.searchsorted(td_t, d.odom_stamp))
+            if k + 1 >= len(stances) or k not in lo_vel or flight_td[k] is None or flight_td[k + 1] is None:
+                continue
+            a, b = stances[k]
+            v_in, (tl, v_lo) = flights[k], lo_vel[k]
+            z_td, z_lo = body_z(a - 1), body_z(b)
+            foot = flight_td[k][:2] - Z_LO * z_td[:2]
+            foot2 = flight_td[k + 1][:2] - Z_LO * body_z(stances[k + 1][0] - 1)[:2]
+            target = np.array([d.target_x, d.target_y])
+            u = target - np.array([d.foot_land_x, d.foot_land_y])
+            X = np.linalg.norm(u)
+            u = u / X if X > 0.05 else None
+            th_l, th_v, th_t = angle(-v_in, z_td), angle(-v_in, v_lo), angle(-v_in, z_lo)
+            nxt = dec.loc[r + 1] if r + 1 in dec.index else None
+            e = foot2 - target
+            hops.append(dict(
+                t=d.odom_stamp, mode=d["mode"], solve=d.solve, X=X,
+                pred=np.linalg.norm(foot - [d.foot_land_x, d.foot_land_y]),
+                tilt_cmd=d.cmd_tilt_deg, tilt=np.degrees(np.arccos(np.clip(z_td[2], -1, 1))),
+                att_err=angle(z_td, np.array([d.cmd_axis_x, d.cmd_axis_y, d.cmd_axis_z])),
+                thv_cmd=d.theta_v_deg, thv=th_v,
+                k1=th_t / th_l if th_l > 6 else np.nan, k2=th_v / th_l if th_l > 6 else np.nan,
+                beta=np.degrees(np.arctan2(-v_in[2], np.hypot(v_in[0], v_in[1]))),
+                eta=(np.linalg.norm(v_lo) / np.linalg.norm(v_in)) ** 2,
+                kick=(flights[k + 1][:2] - v_lo[:2]) @ u if u is not None else np.nan,
+                kick_pred=d.get("pred_kick_v", np.nan),
+                lift=(lo_pos[k][:2] - flight_td[k][:2]) @ u if u is not None and k in lo_pos else np.nan,
+                lift_pred=d.pred_lift_dx,
+                T=t_td(stances[k + 1]) - tl, T_pred=d.pred_t_up + d.pred_t_down,
+                apex_err=(nxt.climb_apex - nxt.climb_target) if nxt is not None and pd.notna(nxt.climb_target) else np.nan,
+                along=e @ u if u is not None else np.nan, across=(u[0] * e[1] - u[1] * e[0]) if u is not None else np.nan,
+                miss=np.linalg.norm(e), model=(foot2 - [d.pred_next_x, d.pred_next_y]) @ u if u is not None else np.nan,
+                tilt_next=np.degrees(np.arccos(np.clip(body_z(stances[k + 1][0] - 1)[2], -1, 1)))))
+        H = pd.DataFrame(hops)
+        if len(H):
+            moving = H[H.X > 0.3]
+            with pd.option_context("display.width", 240, "display.max_rows", 300):
+                print(moving[["t", "mode", "solve", "X", "pred", "tilt_cmd", "tilt", "att_err", "thv_cmd", "thv",
+                              "eta", "kick", "kick_pred", "lift", "lift_pred", "T", "T_pred", "apex_err",
+                              "along", "across", "model"]].round(3).to_string(index=False))
+            print("  (X: hop length; pred: this landing against its apex prediction; att_err: touchdown attitude "
+                  "against the command [deg]; thv: takeoff angle from the arrival [deg]; kick, lift: the push's "
+                  "horizontal kick [m/s] and the stance's CoM shift [m] along the hop; along, across: the next "
+                  "landing against its target; model: against the solve's own prediction [m])")
+            print(f"  landing prediction at the apex [m]: {stats(H.pred)}")
+            print(f"  touchdown attitude against the command [deg]: {stats(H.att_err)}")
+            print(f"  landing tilt as flown [deg]: max {H.tilt_next.max():.1f}")
+            print("  landing against the target, by hop length (D6):")
+            for lo_x, hi_x in ((0.3, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 3.0)):
+                b = moving[(moving.X >= lo_x) & (moving.X < hi_x)]
+                if len(b):
+                    print(f"    {lo_x:.1f}-{hi_x:.1f} m: n={len(b):2d}, along {b.along.mean():+.3f} "
+                          f"(sd {b.along.std():.3f}), across sd {b.across.std():.3f}, "
+                          f"miss median {b.miss.median():.3f} max {b.miss.max():.3f}")
+            st = H[H.k2.notna()]
+            vert = st.beta > 85
+            print(f"  stance model, measured: k1 {stats(st.k1)}")
+            print(f"    k2 after vertical arrivals: {stats(st.k2[vert])}")
+            print(f"    k2 otherwise:               {stats(st.k2[~vert])}")
+            for lo_v, hi_v in ((0, 30), (30, 45), (45, 60), (60, 180)):
+                b = H[(H.thv >= lo_v) & (H.thv < hi_v)]
+                if len(b):
+                    print(f"    eta at theta_v {lo_v}-{hi_v} deg: {stats(b.eta)}")
+            kk = H[(np.abs(H.kick_pred) > 0.02) & H.kick.notna()]
+            if len(kk):
+                print(f"  push kick, measured / predicted: {stats(kk.kick / kk.kick_pred)}")
+
     # ── /cf_1/pose vs ground truth ──
     print("\n== /cf_1/pose vs Gazebo ground truth")
     pose_rows = np.flatnonzero(~df.cf_pose_stamp.duplicated().to_numpy() & (df.cf_pose_stamp > 0).to_numpy())
@@ -517,7 +602,8 @@ def main():
     if dec is not None:
         cols = ["hop_number", "decided", "mode", "land_idx", "target_idx", "retries",
                 "foot_land_x", "foot_land_y", "target_x", "target_y", "target_apex",
-                "takeoff_elev_deg", "unreachable", "planned_tilt_deg", "cmd_tilt_deg",
+                "solve", "alpha_leg_deg", "takeoff_elev_deg", "unreachable",
+                "planned_tilt_deg", "tilt_needed_deg", "cmd_tilt_deg", "plan_tilt_deg",
                 "climb_target", "climb_apex", "push_end", "push_s",
                 "jhc_nominal_h", "push_time"]
         cols = [c for c in cols if c in dec.columns]   # older logs lack the stage 1 columns

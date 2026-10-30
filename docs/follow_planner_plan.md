@@ -1,7 +1,7 @@
 # Plan: make the controller fly the planner's plan
 
-Status: stages 0–3 implemented and tested 2026-10-29 (results in each stage), and problem 2
-fixed along the way (stage 2 results); stage 4 proposed.
+Status: stages 0–4 implemented and tested 2026-10-29 (results in each stage), and problem 2
+fixed along the way (stage 2 results).
 Written 2026-10-29; decisions D1–D6 made the same day. Follows [diagnosis.md](diagnosis.md).
 
 All four problems in the diagnosis come down to one thing: the controller does not fly what the
@@ -527,6 +527,85 @@ arrival, and planned landing attitude.
 3. **low_wall (4,0) at min_clearance 0.3.** Pass when the apex is within ±0.1 m of the target,
    landings are within 0.35 m of their waypoints, and no landing exceeds 20°.
 
+### Stage 4 results (2026-10-29)
+
+Implemented as `HopModel` (`JumpLib/takeoff_solver.py`, 30 unit tests) and hopcopter's apex
+logic; the per-hop record is in `apex_decisions_*.csv` and `calibrate_hops.py`'s stage 4 report.
+Implementation notes, including where it differs from the text above:
+- **Feed-forward and correction.** The controller re-solves every takeoff with its own forward
+  model, from the predicted foot touchdown P and arrival v_in. It does not add corrections to
+  HopPlan's numbers. HopPlan's apex (also the marker's z) is the target; its heading, α_leg, v_h,
+  arrival and landing attitude are logged next to the commanded ones. On long hops the commanded
+  α_leg runs 4–8° steeper than the plan's, because the plan's point-mass arc has no stance shift,
+  no kick and an instant push. The commanded landing tilts run up to 4° below the plan's, because
+  of the refit k2.
+- **The corrections are terms of the forward model**, not biases subtracted afterwards:
+  - the stance shift, from the stance model's liftoff attitude;
+  - the push kick, 6.69 m/s² × sin(liftoff tilt) over stage 2's leveling profile;
+  - the finite push's climb;
+  - g′ of the fall from the next landing tilt;
+  - the next landing's foot offset, looked ahead with the same model. HopPlan's axis assumes the
+    planner's g and arrival.
+- **Touchdown prediction**: the odom twist rotated to world frame, the vertical speed at the apex
+  tick, and the ground under P. The foot touchdown is predicted to < 1 mm median, 2.6 cm max (stage
+  1: 2.1 cm median).
+- **Guards** as specified, except the clearance re-check. It flies at the least apex that passes
+  the planner's test, plus 1 cm, instead of raising H in steps. Planned wall hops sit exactly on
+  that apex, so landing a few cm behind the waypoint already fails the test: the raises were
+  3–6 cm on low_wall. The push target now includes the takeoff ground.
+- **Firmware attitude PID wind-up** (found in step 1). After a continuing landing the push is
+  short (40–65 ms) and ends mid-leveling. The idle motors cannot finish, so the body coasts 3–4° past
+  level while the rate and attitude integrators (KI 500 and 3) wind up. At the apex they drove
+  the fall 1–1.5° past the landing attitude, and the stance turned that into a takeoff 2.5–4° too
+  steep: continuing hops landed 0.1–0.3 m short. Fix: zero thrust for one tick at each apex, which
+  makes the firmware reset its attitude PIDs. The median touchdown attitude error is now 0.02–0.04°.
+- **Step 2 refits.** fcn1's takeoff angle was off by 1.5–2.5°. That is under the 3° threshold
+  above, but it was systematic and moved landings 0.05–0.1 m, so the constants were refit:
+  - k1 1.688 → 1.50: the stance shift was overpredicted 35%, the kick 2–3×.
+  - k2 2.469 → 2.53, rising to 2.70 for arrivals descending more steeply than 75–85°. Measured:
+    2.65–2.72 after first hops from in place, 2.46–2.62 on moving arrivals by run (straight
+    continuation high, doglegs low).
+  - η varies with the redirection, so η(θ) = 0.77 up to θ_v 30°, rising to 0.81 at 60°. Measured:
+    0.765 at 15–35° (48 stances), 0.787 at 45–55° (24), 0.816 at 55–65° (12), each ±0.006.
+  - The planner keeps η 0.77 and k2 2.469. Both err on the safe side: less energy and more tilt
+    than the robot needs.
+
+Final runs, with the final constants (headless, 19:29–19:33). `calibrate_hops.py` on each
+`attitude_*.csv` reproduces these.
+
+| Check | Result |
+|---|---|
+| 1. Range regression: straight hops of 1.0–2.7 m, flat, from rest and at speed (15 hops) | Landing error against hop length (D6), median miss (max): ≤ 1.5 m 0.03 m (0.08); 1.5–2.0 m 0.08 m (0.20); 2.0–2.7 m 0.18 m (0.19). Residual along-track bias +0.02 m up to 1.5 m and +0.08 m at 1.5–2 m, both within the scatter; no bias term added. First hops from hopping in place land within ±0.02 m. |
+| 2. Redirection: straight continuation, doglegs of 30°, 45° and 60° left and right, 1.3–1.5 m hops (17 hops) | Median miss 0.053 m; along −0.018 m (sd 0.070), across sd 0.094. One miss of 0.36 m: a 45° turn at speed whose touchdown attitude was 1.6° off. |
+| 2. Stance model against fcn1 | Refit as above (fcn1 off by 1.5–2.5°). |
+| 2. η against the redirection angle | Varies by 0.05 over 15–65°: η(θ) as above. |
+| 3. low_wall (4,0) at min_clearance 0.3, and back to (0,0) | Pass. Apex within −0.022 to +0.029 m of target. Landings within 0.054 m of their waypoints on the way out and 0.103 m back. Landing tilt ≤ 12.6°. The three earlier runs with interim constants also passed (worst 0.16–0.22 m). |
+| Apex against target, every push cut at the target | ±3 cm in every run. Short continuing pushes (40–65 ms) overshoot by 2–5 cm: stage 2's one-tick cutoff quantization. |
+| Pump guard, live: a 2.8 m first hop from rest | Pumped in place to 1.07, 1.24 and 1.37 m (each apex within 1 cm), then held as specified. The robot drifted 0.09 m back while pumping, which made the hop 2.89 m, just beyond reach. |
+| Apex computation | ~4 ms, inside the 10 ms tick. |
+
+For later:
+- **Attitude authority at speed is now the largest error.** Three of the four misses above
+  0.15 m in the final runs came with a 1.6–2.1° touchdown attitude error. Each was a fast hop
+  (v_h ≳ 1.8 m/s) whose landing attitude needed a forward correction during the fall. The fourth
+  (0.20 m) was the stance turning 1.9° further than the model. Corrections backward complete;
+  forward ones stall. The
+  motor plugins model rotor drag and rolling moments (`model.sdf.jinja`; motor 4's
+  `rollingMomentCoefficient` is 1e-6, 10× the other three). At idle (PWM 1000, at the plugin's
+  cut-off) the motors correct about as much as those moments push. Options:
+  - a higher thrust during the fall, for example PWM 3000: g′ ~9.0, ~0.4 J/kg per hop, and stage
+    0's g′ and stage 2's coast need re-measuring;
+  - a feed-forward on the attitude command.
+- **D4** can stay at 20°. The overshoot behind the 98–117% achieved/commanded tilts was the PID
+  wind-up; with the reset, landings tilt as commanded (median error 0.03°). The worst landing as
+  flown was 18.8°.
+- **D6** (hop-length cap): errors grow past 2 m because of the attitude limit above. A 2.0 m cap
+  would keep landings within ~0.2 m in these runs.
+- **The pump height** (v_h² / (2g′η cos²40°) + 5 cm) undershoots after the first pump: a faster
+  arrival shortens the climb, so the hop needs more v_h. With two retries it reaches ~2.7 m from
+  rest. The planner never plans such hops at 4 J/kg.
+- The stance and kick constants were fit in the sim only.
+
 ## Deferred
 
 - **Problem 2: fixed 2026-10-29** (found in stage 2). A `supervisor.info` log showed armed →
@@ -551,7 +630,7 @@ arrival, and planned landing attitude.
   ~2 J/kg only to avoid the cost's momentum-loss charge, which is pointless where the robot stops.
   Without it the final apex would be ~0.87 m instead of 1.08 m. Prototype exempting that hop
   before adopting it.
-- **Hop-length cap** (D6), after stage 4's range regression.
+- **Hop-length cap** (D6): stage 4's range regression is in; see its results for the data.
 
 Every stage gets a CHANGELOG entry under [Unreleased] giving the reason for each new value. Update
 CLAUDE.md and README wherever a stage changes what they describe: the waypoint queue, JHC, LJC's

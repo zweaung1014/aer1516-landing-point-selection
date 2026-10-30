@@ -44,7 +44,7 @@ This project simulates **Hopcopter** — a Crazyflie-based monopedal hopping rob
 
 **Pipeline:**
 1. **ballistic_planner** — Reads the 2.5D elevation map, listens for `/goal_pose`, and runs a hopping-aware A* search to compute a global path of physically feasible parabolic hops. Publishes a set of waypoints (Marker id=400) and each hop's takeoff (`hopcopter_msgs/HopPlan`).
-2. **hopcopter** — Controls the hopping robot's attitude to follow the waypoints.
+2. **hopcopter** — Follows the waypoints one hop each. At every apex it re-solves the planned takeoff from where and how fast the robot is about to land, and commands the landing attitude that launches it.
 
 ---
 

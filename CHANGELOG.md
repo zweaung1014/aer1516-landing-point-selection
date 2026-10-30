@@ -3,6 +3,68 @@
 ## [Unreleased]
 
 ### Added
+- **hopcopter solves each hop's takeoff at the apex** (stage 4 of `docs/follow_planner_plan.md`;
+  `JumpLib/takeoff_solver.py`, `HopModel`). This replaces `LinearJumpingController.jumping_planning`,
+  which sized each hop from the apex energy alone and aimed 15% short (`velocity_gain` 0.85). From
+  the predicted foot touchdown P and arrival velocity v_in, the solve finds the leg launch (heading,
+  α_leg) whose landing hits the next waypoint at its target apex. The forward model of the hop:
+  - **The leg** launches at √η·|v_in|, in the direction the stance model reaches from the
+    landing attitude. η depends on how far the stance turns the arrival (verify step 2): 0.77 up
+    to θ_v 30°, rising linearly to 0.81 at 60°. Stage 4 measured 0.765 at 15–35° (48 stances),
+    0.787 at 45–55° (24) and 0.816 at 55–65° (12), each to ±0.006. The planner keeps η 0.77, so
+    it plans continuing hops with slightly less energy than they carry.
+  - **The stance** moves the CoM: the liftoff CoM sits 0.02–0.10 m ahead of the touchdown CoM,
+    along the liftoff attitude.
+  - **The push** is level and cut off at the apex. Its climb comes from stage 2's push model: a
+    finite push climbs slower than a ballistic arc, about 8% more flight time. While the body is
+    still tilted after liftoff, it also kicks the robot forward:
+    6.69 m/s² × sin(liftoff tilt), over stage 2's leveling profile. That is 0.15–0.25 m/s on a
+    first steered hop.
+  - **The fall** runs at the g′ of the next landing tilt, 9.55 − 4.1·(1 − cos tilt) (stage 0),
+    down to the touchdown CoM height over the ground there. The foot lands off the CoM along the
+    next landing attitude, which the controller looks ahead with the same model.
+
+  HopPlan supplies the apex. Its planned heading, α_leg, v_h, arrival and landing attitude are
+  logged next to the commanded ones. The guards:
+  - **The leg alone overshoots the apex:** the steep no-push root, which keeps the arc above the
+    planned apex.
+  - **The leg cannot reach the next waypoint above 40° of leg angle:** hop in place first, to the
+    apex from which it can (v_h² / (2g′η cos²40°), plus 5 cm, at most 1.5 m). The tracker counts
+    that as a retry and holds after two.
+  - **Clearance:** every hop re-runs the planner's test (`clearance_floor_alpha`) from where the
+    robot actually lands, on the cached map. A hop that fails flies at the least apex that passes
+    plus 1 cm, or hops in place if that is more than 0.3 m higher. Planned wall hops sit exactly on
+    that apex, so a landing a few cm behind the waypoint already needs a raise: 3–5 cm on
+    low_wall.
+  - **Tilt:** the braking tilt guard, now `HopModel.limit_tilt`.
+
+  Results (the plan doc's stage 4 results):
+  - low_wall (4,0) and back: apex within ±0.03 m, landings within 0.10 m of their waypoints,
+    landing tilt ≤ 12.6°.
+  - Flat: hops up to 1.5 m land 0.03 m from target (median); doglegs of 30–60° 0.05 m.
+  - Fast hops (v_h ≳ 1.8 m/s) still miss by up to 0.2–0.36 m. Their landing attitude needs a
+    forward correction that the idle motors cannot make against the motor model's rotor drag.
+- **Zero thrust for one tick at each apex.** The firmware resets its attitude PIDs whenever the
+  thrust setpoint is 0. A short push after a continuing landing ends while the body is still
+  leveling. The idle motors cannot finish the job, so the body coasts ~3–4° past level, and the
+  rate and attitude integrators wind up against it. At the apex they drove the fall 1–1.5° past
+  its landing attitude, and the stance turns that into a takeoff 2.5–4° too steep: landings
+  0.1–0.3 m short. With the reset, the median touchdown attitude error is 0.02–0.04°. Over the
+  reset and the refits below together, the dogleg runs' median miss fell from 0.084 m to
+  0.04–0.05 m.
+- **Stage 4 report in `calibrate_hops.py`**. It shows each steered hop against the solve and
+  the plan:
+  - the apex landing prediction;
+  - the touchdown attitude against the command;
+  - the takeoff angle, η, push kick, stance shift and flight time against the model;
+  - the next landing against its target and against the model.
+
+  It also reports landing error against hop length (D6), and refits k1, k2 (by arrival) and η (by
+  redirection angle).
+- **`test_takeoff_solver.py`** (30 tests). Every solved hop lands on its target, in the model and
+  in an independent step integration of the same physics (within 1 cm). It also covers the
+  stance model against fcn1, the climb, the steep root, the pump, the in-place hop, the tilt guard
+  against stage 1's, and the clearance apex over low_wall.
 - **Momentum-aware planner mode** (stage 3 of `docs/follow_planner_plan.md`;
   `search.momentum_aware`, on by default). The reference A* plans hops the robot cannot fly: it
   pushes along the takeoff angle, lets the leg alone sustain the start's apex, never checks how
@@ -41,8 +103,8 @@
   arrival velocity, and the landing axis and tilt that redirect the robot into the next hop (or
   stop it at the goal). Per plan: the arrival speed and stance assumed at the start, and the
   model constants (g, η, k2, `momentum_aware`). It is published just before the marker pair,
-  and all three share one stamp. The id=400 marker is unchanged; hopcopter does not read
-  `HopPlan` yet (stage 4).
+  and all three share one stamp. The id=400 marker is unchanged. hopcopter matches it to the
+  marker by stamp and logs every commanded hop against it (stage 4).
 - **`ballistic_plan_check`** (offline, no ROS graph):
   `ros2 run ballistic_motion_planner ballistic_plan_check`. It plans 15 cases with the node's
   defaults: the plan doc's three expected plans, the rest of the 13-case matrix, and stairs on
@@ -99,6 +161,41 @@
   `ballistic_path_*.csv` z now matches the published marker z.
 
 ### Changed
+- **hopcopter's stance model is refit** (stage 4, verify step 2; `HopModel`):
+  - k1 1.688 → 1.50.
+  - k2 2.469 → 2.53, rising to 2.70 for arrivals descending more steeply than 75–85° (a linear
+    ramp). Moving arrivals measured 2.46–2.55 by descent angle, higher on straight continuation
+    and lower on doglegs; 2.53 landed with the least bias.
+
+  The fit is over 48 steered stances with the zero-thrust reset (and 58 before it). With fcn1's
+  constants:
+  - First steered hops launched ~2° flatter than commanded (k2 2.70) and landed 0.03–0.11 m long.
+  - On continuing hops, k1 overpredicted the stance shift by 35% and the push kick 2–3×.
+
+  The planner keeps 2.469 for its 20° tilt cap, which errs on the safe side: the refit k2 needs
+  less tilt for the same turn.
+- **Touchdown prediction at the apex**:
+  - the odom twist rotated into the world frame (it is body frame);
+  - the vertical speed already reached when the apex is detected;
+  - the ground under the touchdown from the map;
+  - the touchdown CoM height L·cos(tilt);
+  - the g′ of the landing tilt.
+
+  The foot touchdown is now predicted to ~1 mm median (2 cm max) in the sim, against 2.1 cm in
+  stage 1.
+- **The push aims at the apex above the takeoff ground** (the map's elevation under the takeoff
+  foot), not above flat ground.
+- **Apex-decision CSV columns** (stage 4):
+  - `unreachable` becomes `solve` (`push`, `leg`, `capped`, `pump`, `blocked`), and
+    `planned_tilt_deg` becomes `tilt_needed_deg`.
+  - New: the predicted arrival `v_in_*`; the solved `alpha_leg_deg`, `v_leg`, `v_h_leg` and
+    `apex_raise`; the commanded landing axis `cmd_axis_*`.
+  - New `pred_*` columns, the model's expectations: push, climb and fall times, kick distance and
+    speed, stance shift, liftoff tilt, next foot touchdown.
+  - New `plan_*` columns from HopPlan: this landing's waypoint, arrival, landing axis and tilt, and
+    the next hop's heading, α_leg, v_h and apex.
+  - `takeoff_heading_deg` and `takeoff_elev_deg` are now the commanded leg launch, and
+    `theta_v_deg` the solve's.
 - **The planner node's defaults are the real robot** (stage 3; this and the next two entries).
   `search.momentum_aware` true, and:
   - `physics.mass` 0.8 → 0.3609 kg (hopcopter's `hop_mass`);

@@ -68,9 +68,11 @@ until **Play** is pressed in the Gazebo GUI. A goal then goes in either by publi
 
 There is **no test suite for the simulation**. The `test/` directories in the Python packages
 contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
-`test_waypoint_tracker.py` and `test_push_controller.py`. Run them with
-`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py`.
-They cover waypoint decisions, the braking tilt guard and the push cutoff. The planner has two
+`test_waypoint_tracker.py`, `test_push_controller.py` and `test_takeoff_solver.py`. Run them with
+`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py test/test_takeoff_solver.py`.
+They cover waypoint decisions, the braking tilt guard, the push cutoff, and the takeoff solve
+(each solved hop lands on its target, also under an independent step integration; the guards; the
+clearance re-check). The planner has two
 offline executables (no ROS graph): `ros2 run ballistic_motion_planner ballistic_parity_test`
 (the reference search against the Python port; its output must stay byte-identical) and
 `ballistic_plan_check` (the momentum-aware search on 15 cases: landing tilts, the expected plans,
@@ -92,7 +94,9 @@ convention: **+x is drawn vertically up, +y horizontally left.**
 
 For the live pipeline, `python visualize_rpy.py` plots commanded vs actual attitude and
 `python calibrate_hops.py` reports g′, η per stance, the odom twist frame, push thrust, cutoff
-latency, `/cf_1/pose` error, and the push cutoff's lead, apex error and capacity. Both read hopcopter's newest per-tick
+latency, `/cf_1/pose` error, and the push cutoff's lead, apex error and capacity. It also shows each
+steered hop against the takeoff solve and the plan, landing error against hop length, and refits
+the stance model (stage 4). Both read hopcopter's newest per-tick
 `data/data_ballistic_planner/position_attitude_tracking/attitude_*.csv` and need pandas (the repo
 `.venv`, not `/usr/bin/python3`). Per-apex decisions go to `hop_tracking/apex_decisions_*.csv`.
 
@@ -117,14 +121,14 @@ hop that lands on that waypoint — the planned apex height above that hop's tak
 on. It is a relative height, not a world z. Just before the marker pair, with the same stamp,
 it publishes `hopcopter_msgs/HopPlan` on `/ballistic_hop_plan`: each hop's heading, leg angle
 α_leg, v_h, target apex and injection, its expected arrival velocity, and the landing attitude
-and tilt that redirect the robot into the next hop (hopcopter does not read it yet; stage 4 of
-`docs/follow_planner_plan.md`). The node works entirely in the world frame and does not use TF
-or the LiDAR.
+and tilt that redirect the robot into the next hop. hopcopter logs every commanded takeoff and
+landing against it. The node works entirely in the world frame and does not use TF or the LiDAR.
 
 By default (`search.momentum_aware`, with the robot's parameters from
 `ballistic::robot_params()`) the search models the robot that flies the plan: a vertical push,
 so the leg alone supplies v_h and hops keep α_leg ≥ 42°; at most 4 J/kg and one 30000 push per
-hop; a 20° cap on every landing's tilt under hopcopter's stance model (k2 2.469), with the start
+hop; a 20° cap on every landing's tilt under the stance model (k2 2.469; hopcopter now uses
+stage 4's refit, which needs less tilt for the same turn), with the start
 a vertical arrival and a stop required at the goal; and 4 "banking" angles per hop besides the
 least-injection one. Off, it is the reference port, unchanged. `PlannerParams`' own defaults
 are the reference planner's, which `ballistic_parity_test` uses; the node's are the robot's. Each plan also writes `snapshot_<stamp>.json` to
@@ -158,26 +162,46 @@ push as soon as the coast will reach the target:
 `(z − z_lo) + v²/(2g′) + v·(a_T/g′)·t_lead ≥ H`, where z_lo is the liftoff CoM height
 (`leg_length`), v the differentiated-pose vertical speed, g′ 9.55, and t_lead 0.026 s (thrust
 still arriving after the cut, plus half a tick). A push is capped at 0.4 s. In place it lands
-within ±3 cm of the target. `JumpingHeightController` is no longer used. The takeoff angle is
-still chosen by `LinearJumpingController`, not the planner. Its `limit_landing_tilt` (braking
-tilt guard) rotates a takeoff that needs more than 20° of landing tilt toward continuing the
-arrival. Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnboard`
+within ±3 cm of the target. `JumpingHeightController` is no longer used. The push target is the
+apex above the ground the hop takes off from (the cached elevation map).
+
+The takeoff itself is solved at the apex (`JumpLib/takeoff_solver.py`, `HopModel`, unit-tested in
+`test/test_takeoff_solver.py`; stage 4). The push is level, so the leg alone supplies the
+horizontal speed: it launches at √η·|v_in| along a direction the stance model (fcn1) reaches from
+the landing attitude. The solve finds the leg launch whose landing hits the next waypoint at its
+target apex, from the predicted foot touchdown P and arrival velocity v_in. Its forward model
+includes the stance's CoM shift, the push's horizontal kick while the body is still tilted after
+liftoff, the finite push's slower climb, and the g′ of a fall steered to the next landing tilt.
+Its constants were measured in stages 0–4: k1 1.5; k2 2.53, or 2.70 after a near-vertical arrival;
+η 0.77–0.81, growing with the redirection; kick 6.69 m/s². See `CHANGELOG.md`.
+
+Guards on the solved takeoff:
+- the leg alone overshooting the apex takes the steep no-push root;
+- a hop the leg cannot fly above 40° of leg angle hops in place first, high enough to fly it next
+  time (the tracker counts that as a retry);
+- a hop from off its waypoint re-checks the planner's clearance on the cached map and flies at the
+  least apex that clears;
+- `HopModel.limit_tilt` (braking tilt guard) rotates a takeoff that needs more than 20° of landing
+  tilt toward continuing the arrival.
+
+`LinearJumpingController.jumping_planning` (and its `velocity_gain` 0.85) is no longer used.
+Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnboard`
 (`JumpLib/jumping_tools.py`), whose `jumping_state` is the clock for the whole system:
 
-- **1 — falling/ballistic:** unpowered, attitude tracked from the planned arc (`LinearJumpingController`).
+- **1 — falling/ballistic:** idle thrust, attitude held at the landing attitude the solve commands.
 - **2 — stance:** foot down, inverted-pendulum swing, unpowered.
 - **3 — climbing:** powered thrust; a new hop begins here.
 
-After the apex (3 → 1) it predicts the landing point (`LandingStateEstimator`, using
-`leg_length` 0.366 m as the touchdown CoM height and g′ 9.55), decides the waypoint, plans the
-ballistic arc, and derives the roll/pitch that steer it. Each decision is a row in
-`hop_tracking/apex_decisions_*.csv`.
+After the apex (3 → 1) it predicts the touchdown: the odom twist rotated to world frame, the fall to
+the leg's height over the ground below at the landing tilt's g′. It then decides the waypoint,
+solves the takeoff, and commands the landing attitude as roll/pitch. Each decision is a row in
+`hop_tracking/apex_decisions_*.csv`, with the planned (HopPlan) and commanded values side by side.
 
 **3. `elevation_map_publisher_node`** (`elevation_map_publisher/`) publishes the **known** 2.5D
 map on `/elevation_map` (`grid_map_msgs/GridMap`, transient_local so late subscribers still get
 it). The scenario is selectable by parameter (`low_wall` or `flat`). `ballistic_planner_node`
-cannot plan without it. `hopcopter` still subscribes and caches it (`_ground_elevation_at`), but
-that lookup no longer drives hop height. LiDAR-based map building is future work.
+cannot plan without it. `hopcopter` caches it too: the ground under each predicted touchdown and
+takeoff, and the clearance re-check. LiDAR-based map building is future work.
 
 **4. `nlp_goal_node`** (`nlp_goal_interface/`) is a terminal REPL that calls the Anthropic
 API with two tools (`extract_coordinates`, `approach_object`) and publishes the result on
@@ -206,6 +230,13 @@ and controller work in the world frame) but is kept for RViz and legacy consumer
   touching it.
 - **`CHANGELOG.md` records why parameters have their values.** Consult it before retuning the
   ballistic planner or the hop controller; several defaults look arbitrary and are not.
+- **hopcopter sends zero thrust for one tick at every apex, on purpose.** The firmware resets its
+  attitude PIDs whenever the thrust setpoint is 0 (`controller_pid.c`). Without the reset, the
+  integrators wound up while the idle motors could not level the body after a short push, and the
+  fall then overshot its landing attitude by 1–1.5°, which put continuing hops 0.1–0.3 m short.
+- **Pitch signs in the per-tick CSV.** `act_pitch_deg` is the negative of the convention of
+  `des_pitch_deg` and of hopcopter's commands: a body tracking its command logs
+  `act_pitch_deg ≈ -des_pitch_deg`. Roll has one convention.
 - **Two parameter sets in the planner.** The node's defaults (`robot_params()`: mass 0.3609,
   η 0.77, 4 J/kg, min_clearance 0.3, momentum-aware) are not `PlannerParams`' defaults (the
   reference planner's, for `ballistic_parity_test`). Change a node default in `robot_params()`,

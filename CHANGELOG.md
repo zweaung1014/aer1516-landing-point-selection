@@ -185,6 +185,15 @@
     (`set_obstacle_region` rounds out to 3–4 cells). Maze poles are 3 m tall in Gazebo.
 
 ### Changed
+- **hopcopter's clearance re-check spreads only terrain edges, as the planner does**
+  (`takeoff_solver.dilate`, new `steep_mask`). It used to take the highest cell within 0.33 m of
+  every cell, which equals the planner's field on flat-topped obstacles but lifts a slope by its
+  rise over that distance. On `slope_30deg` the first hop (planned apex 0.84 m) then needed 5.8 m,
+  so every hop onto the slope came out `blocked` and the robot held at the start. Now only cells
+  steeper than 60° to a neighbour (and obstacles) spread, never below a cell's own ground; that
+  hop needs 0.55 m. low_wall, flat, stairs and maze give the same field as before; on
+  `stairs_with_curb` the 0.15 m curbs (not steep against their treads) no longer spread over the
+  treads, as in the planner.
 - **hopcopter's stance model is refit** (stage 4, verify step 2; `HopModel`):
   - k1 1.688 → 1.50.
   - k2 2.469 → 2.53, rising to 2.70 for arrivals descending more steeply than 75–85° (a linear

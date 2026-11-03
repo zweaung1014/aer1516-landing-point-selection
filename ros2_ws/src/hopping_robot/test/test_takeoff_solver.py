@@ -207,6 +207,27 @@ def test_dilate():
     assert dilate(g, res, 0.33)[12, 10] == np.inf
 
 
+def test_dilate_spreads_only_edges():
+    """A 30 deg slope (slope_30deg's first hop) keeps its own height: the planner spreads only
+    edges steeper than 60 deg, and dilating every cell asked a 5.8 m apex of this 0.84 m hop."""
+    res, origin = 0.1, (-0.5, -4.5)
+    xs = origin[0] + (np.arange(50) + 0.5) * res
+    ys = origin[1] + (np.arange(50) + 0.5) * res
+    grid = np.zeros((50, 50))
+    band = (ys >= -3.5 - 1e-9) & (ys < -0.5 - 1e-9)
+    grid[:, band] = (math.tan(math.radians(30.0)) * np.clip(xs - 0.5, 0.0, 3.5))[:, None]
+    field = dilate(grid, res, 0.33)
+    # away from its sides (edges against the flat margins, which spread 0.4 m in)
+    inner_x, inner_y = (xs > 0.6) & (xs < 4.0), (ys > -3.0) & (ys < -1.0)
+    assert np.array_equal(field[np.ix_(inner_x, inner_y)], grid[np.ix_(inner_x, inner_y)])
+    p, t = (0.0, 0.0), (0.75, -1.15)
+    gt = grid[int((t[0] - origin[0]) / res), int((t[1] - origin[1]) / res)]
+    assert clearance_apex(field, origin, res, p, t, 0.0, gt, 0.3) < 0.844 + 0.3
+    # the slope's 2.02 m side faces, against the margins, are edges and still spread
+    side = int((-0.45 - origin[1]) / res)
+    assert field[int((3.95 - origin[0]) / res), side] == pytest.approx(grid[:, band].max())
+
+
 def test_clearance_apex_over_the_wall():
     grid, origin, res = low_wall()
     field = dilate(grid, res, 0.33)

@@ -200,8 +200,8 @@ class hopcopter(Node):
         self._reset_attitude_pid = False
         self.hop_plan = None          # latest HopPlan
         self.path_plan = None         # the HopPlan of the current path (same stamp as its marker)
-        # Clearance re-check: the planner's test (the arc min_clearance above terrain dilated by
-        # robot_radius + min_clearance) for each hop from where the robot actually lands. A hop
+        # Clearance re-check: the planner's test (the arc min_clearance above terrain whose edges
+        # steeper than 60 deg are dilated by robot_radius + min_clearance) for each hop from where the robot actually lands. A hop
         # that fails it flies at the least apex that passes, plus apex_clear_margin (planned hops
         # over a wall sit exactly on that apex), unless that is more than apex_raise_max higher.
         self.min_clearance = 0.3      # the planner's min_clearance (D3)

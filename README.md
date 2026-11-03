@@ -176,13 +176,77 @@ Terminal 1 keeps `-x 0 -y 0`. The goal is the Python `GOAL` in world coordinates
 | Cliff gap | `crazysim_cliff_gap` | `cliff_gap` | (9.5, 0.5) |
 | Maze | `crazysim_maze` | `maze` | (14.0, 0.0) |
 
-For example, the stairs:
+Copy-paste commands for each world (Terminals 2–4, 6 and 7 are the same for every world).
+Send the goal after pressing **Play** and waiting for the warm-up hops.
+
+#### Stairs
 
 ```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware)
 bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_stairs
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
 ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=stairs
+
+# Goal
 ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 "{header: {frame_id: 'world'}, pose: {position: {x: 4.0, y: -2.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+#### Stairs with curbs
+
+```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware)
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_stairs_with_curb
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=stairs_with_curb
+
+# Goal
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 4.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+#### 30° slope
+
+```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware)
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_slope_30deg
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=slope_30deg
+
+# Goal
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 4.25, y: -2.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+#### Cliff gap
+
+```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware)
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_cliff_gap
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=cliff_gap
+
+# Goal
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 9.5, y: 0.5, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+#### Maze
+
+```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware)
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_maze
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=maze
+
+# Goal
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 14.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
 ```
 
 `stairs`, `stairs_with_curb` and `cliff_gap` are edited from the Python maps so the planner can

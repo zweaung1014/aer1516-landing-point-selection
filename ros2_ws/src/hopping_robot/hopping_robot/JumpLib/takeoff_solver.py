@@ -331,10 +331,30 @@ class HopModel:
 
 # ---- clearance re-check (the planner's test, on the controller's copy of the map) ----
 
-def dilate(grid, res, radius):
-    """Grid of the highest cell within radius of each cell (NaN cells count as +inf). The planner
-    dilates only steep cells; dilating all of them is the same on flat-topped obstacles."""
-    src = np.where(np.isfinite(grid), grid, np.inf)
+def steep_mask(grid, res, min_grade=math.tan(math.radians(60.0))):
+    """The planner's terrain edges (Map2D5::steep_mask): both cells of every 8-neighbour pair whose
+    heights differ by more than min_grade times their distance, and every NaN (obstacle) cell and
+    its neighbours."""
+    obs = ~np.isfinite(grid)
+    z = np.where(obs, 0.0, grid)
+    mask = obs.copy()
+    nx, ny = grid.shape
+    for di, dj in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        dist = res * math.hypot(di, dj)
+        ia = (slice(0, nx - di), slice(max(0, -dj), ny - max(0, dj)))
+        ib = (slice(di, nx), slice(max(0, dj), ny - max(0, -dj)))
+        steep = (np.abs(z[ib] - z[ia]) > min_grade * dist) | obs[ia] | obs[ib]
+        mask[ia] |= steep
+        mask[ib] |= steep
+    return mask
+
+
+def dilate(grid, res, radius, steep_grade=math.tan(math.radians(60.0))):
+    """The planner's inflated field (Map2D5::inflated_field): the highest terrain edge (steep_mask)
+    within radius of each cell, never below the cell's own ground; NaN cells count as +inf. Only
+    edges spread, so a slope gentler than steep_grade keeps its own height."""
+    filled = np.where(np.isfinite(grid), grid, np.inf)
+    src = np.where(steep_mask(grid, res, steep_grade), filled, -np.inf)
     reach = radius + res * math.sqrt(2.0) / 2.0      # the planner's lookup pad
     n = int(math.ceil(reach / res))
     out = np.full(src.shape, -np.inf)
@@ -346,7 +366,7 @@ def dilate(grid, res, radius):
             a = src[max(0, di):nx + min(0, di), max(0, dj):ny + min(0, dj)]
             o = out[max(0, -di):nx + min(0, -di), max(0, -dj):ny + min(0, -dj)]
             np.maximum(o, a, out=o)
-    return np.maximum(out, src)
+    return np.maximum(out, filled)
 
 
 def clearance_apex(field, origin, res, p, target, ground_p, ground_t, gate, max_step=0.05):

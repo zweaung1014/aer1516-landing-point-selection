@@ -1,9 +1,15 @@
 // Publishes a known, hand-built 2.5D elevation map as grid_map_msgs/GridMap.
 //
 // First stage of the ballistic-planning pipeline: scenarios mirror the maps in
-// hopcopter-ballistic-planning/maps/ (currently "low_wall" and "flat"), painted
-// in world coordinates. Later this node will be replaced/extended to build the
-// same map from the LiDAR point cloud, keeping /elevation_map as the boundary.
+// hopcopter-ballistic-planning/maps/. "low_wall" and "flat" are painted in
+// world coordinates. The others ("stairs", "stairs_with_curb", "slope_30deg",
+// "cliff_gap", "maze") are painted in their reference file's frame and placed
+// so its START sits at world (0, 0), where the robot spawns: origin = -START.
+// Each has a Gazebo twin, worlds/crazysim_<scenario>.sdf. stairs,
+// stairs_with_curb and cliff_gap are edited from the reference files so the
+// robot's planner (robot_params()) can plan them; see CHANGELOG.md. Later this
+// node will be replaced/extended to build the same map from the LiDAR point
+// cloud, keeping /elevation_map as the boundary.
 //
 // OBSTACLE encoding on the wire: NaN in the "elevation" layer (grid_map's
 // native "no value"; the RViz plugin renders it as a hole). Any painted cell
@@ -13,7 +19,9 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
@@ -21,22 +29,121 @@
 #include <grid_map_ros/GridMapRosConverter.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
 
+namespace
+{
+constexpr double kObstacle = std::numeric_limits<double>::infinity();
+constexpr double kNone = std::numeric_limits<double>::quiet_NaN();  // unbounded side
+
+// Geometry defaults and the reference goal, in world coordinates.
+struct Scenario
+{
+  double size_x, size_y, origin_x, origin_y;
+  double goal_x, goal_y;
+};
+
+const std::map<std::string, Scenario> kScenarios = {
+  {"flat", {5.0, 5.0, -0.5, -2.5, 4.0, 0.0}},
+  {"low_wall", {5.0, 5.0, -0.5, -2.5, 4.0, 0.0}},
+  {"stairs", {5.0, 5.0, -0.5, -4.5, 4.0, -2.0}},
+  {"stairs_with_curb", {5.0, 5.0, -0.5, -2.5, 4.0, 0.0}},
+  {"slope_30deg", {5.0, 5.0, -0.5, -4.5, 4.25, -2.0}},
+  {"cliff_gap", {15.0, 5.0, -0.5, -2.5, 9.5, 0.5}},
+  {"maze", {15.0, 5.0, -0.5, -2.5, 14.0, 0.0}},
+};
+
+// paint_region's center-inclusion rule: lo <= v < hi, NaN unbounded.
+bool in(double v, double lo, double hi)
+{
+  const double eps = 1e-9;
+  return (std::isnan(lo) || v >= lo - eps) && (std::isnan(hi) || v < hi - eps);
+}
+
+// Terrain at the cell center (x, y) in the reference file's frame;
+// kObstacle for an infinitely tall column.
+double reference_z(const std::string & scenario, double x, double y)
+{
+  const double slope = std::tan(30.0 * M_PI / 180.0);
+  if (scenario == "stairs") {
+    // maps/stairs.py with 0.4 m risers on 0.6 m treads (was 0.6 on 0.3 from
+    // x 2.0), four steps: the top is 1.6 m from x 3.3 to the map edge.
+    if (!in(y, 1.0, 4.0) || x < 1.5) {
+      return 0.0;
+    }
+    return 0.4 * std::min(4, 1 + static_cast<int>(std::floor((x - 1.5 + 1e-9) / 0.6)));
+  }
+  if (scenario == "stairs_with_curb") {
+    // maps/stairs_with_curb.py with 0.15 m curbs on 1.0 m treads (was 0.6 m on
+    // 0.4 m from x 2.0). Full width: no bypass.
+    const double curb = 0.15;
+    if (in(x, 1.2, 1.4)) {return 0.40 + curb;}
+    if (in(x, 1.4, 2.4)) {return 0.40;}
+    if (in(x, 2.4, 2.6)) {return 0.80 + curb;}
+    if (in(x, 2.6, 3.6)) {return 0.80;}
+    if (in(x, 3.6, 3.8)) {return 1.20 + curb;}
+    if (in(x, 3.8, kNone)) {return 1.20;}
+    return 0.0;
+  }
+  if (scenario == "slope_30deg") {
+    // maps/slope_30deg.py, unchanged: 30 deg from x 1.0, platform from 4.5.
+    if (!in(y, 1.0, 4.0) || x < 1.0) {
+      return 0.0;
+    }
+    return slope * (std::min(x, 4.5) - 1.0);
+  }
+  if (scenario == "cliff_gap") {
+    // maps/cliff_gap.py with a 1.0 m gap (was 1.5 m: x 6.5-8.0).
+    if (!in(y, 1.0, 4.0) || x < 2.0) {
+      return 0.0;
+    }
+    const double platform = 1.80, x_slope_top = 2.0 + 3.118;
+    if (x <= x_slope_top) {return slope * (x - 2.0);}
+    if (x <= 6.5) {return platform;}
+    if (x < 7.5) {return 0.0;}
+    if (x <= 11.5) {return platform;}
+    if (x <= 11.8) {return platform - 0.6;}
+    if (x <= 12.1) {return platform - 1.2;}
+    return 0.0;
+  }
+  if (scenario == "maze") {
+    // maps/maze.py, unchanged. Each pole is the 2 x 2 cells whose centers lie
+    // in its 0.2 m footprint (set_obstacle_region rounds out to 3-4 cells).
+    static const double poles[][2] = {
+      {2.0, 1.5}, {2.5, 3.5}, {3.5, 2.5}, {4.0, 4.2}, {4.5, 0.8}, {5.5, 3.0}, {5.8, 1.5},
+      {6.5, 4.0}, {6.7, 2.2}, {8.5, 2.8}, {8.7, 4.2}, {9.5, 1.5}, {10.0, 3.5}, {10.5, 2.0},
+      {11.5, 4.0}, {12.0, 1.2}, {12.5, 3.0}};
+    for (const auto & p : poles) {
+      if (in(x, p[0] - 0.1, p[0] + 0.1) && in(y, p[1] - 0.1, p[1] + 0.1)) {
+        return kObstacle;
+      }
+    }
+    return in(x, 7.35, 7.65) && in(y, 1.0, 4.0) ? 0.5 : 0.0;
+  }
+  throw std::invalid_argument("no reference map for scenario '" + scenario + "'");
+}
+}  // namespace
+
 class ElevationMapPublisher : public rclcpp::Node
 {
 public:
   ElevationMapPublisher()
   : Node("elevation_map_publisher")
   {
-    size_x_ = this->declare_parameter("map.size_x", 5.0);
-    size_y_ = this->declare_parameter("map.size_y", 5.0);
+    scenario_ = this->declare_parameter("scenario", std::string("low_wall"));
+    const auto it = kScenarios.find(scenario_);
+    if (it == kScenarios.end()) {
+      RCLCPP_FATAL(this->get_logger(), "Unknown scenario '%s'", scenario_.c_str());
+      throw std::runtime_error("unknown scenario");
+    }
+    const Scenario & s = it->second;
+    size_x_ = this->declare_parameter("map.size_x", s.size_x);
+    size_y_ = this->declare_parameter("map.size_y", s.size_y);
     resolution_ = this->declare_parameter("map.resolution", 0.1);
-    origin_x_ = this->declare_parameter("map.origin_x", -0.5);
-    origin_y_ = this->declare_parameter("map.origin_y", -2.5);
+    origin_x_ = this->declare_parameter("map.origin_x", s.origin_x);
+    origin_y_ = this->declare_parameter("map.origin_y", s.origin_y);
     frame_id_ = this->declare_parameter("map.frame_id", std::string("world"));
     default_z_ = this->declare_parameter("map.default_z", 0.0);
     obstacle_height_threshold_ =
       this->declare_parameter("map.obstacle_height_threshold", 5.0);
-    scenario_ = this->declare_parameter("scenario", std::string("low_wall"));
     // Wall geometry in WORLD coordinates (y unbounded: full map width).
     wall_height_ = this->declare_parameter("wall.height", 0.4);
     wall_x_min_ = this->declare_parameter("wall.x_min", 2.5);
@@ -57,8 +164,10 @@ public:
       [this]() { publishMap(); });
 
     RCLCPP_INFO(this->get_logger(),
-      "Publishing '%s' elevation map: %.1fx%.1f m @ %.2f m, origin (%.2f, %.2f)",
-      scenario_.c_str(), size_x_, size_y_, resolution_, origin_x_, origin_y_);
+      "Publishing '%s' elevation map: %.1fx%.1f m @ %.2f m, origin (%.2f, %.2f); "
+      "reference goal (%.2f, %.2f)",
+      scenario_.c_str(), size_x_, size_y_, resolution_, origin_x_, origin_y_,
+      s.goal_x, s.goal_y);
   }
 
 private:
@@ -83,8 +192,7 @@ private:
           z = wall_height_;
         }
       } else if (scenario_ != "flat") {
-        RCLCPP_FATAL(this->get_logger(), "Unknown scenario '%s'", scenario_.c_str());
-        throw std::runtime_error("unknown scenario");
+        z = default_z_ + reference_z(scenario_, pos.x() - origin_x_, pos.y() - origin_y_);
       }
       if (z >= obstacle_height_threshold_) {
         z = std::numeric_limits<double>::quiet_NaN();  // OBSTACLE: infinite column

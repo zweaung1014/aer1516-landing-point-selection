@@ -126,7 +126,7 @@ ros2 run ros_gz_bridge parameter_bridge \
 
 Publishes the known 2.5D map (`grid_map_msgs/GridMap` on `/elevation_map`,
 5×5 m @ 0.1 m, origin (−0.5, −2.5); scenario selectable via the `scenario`
-parameter: `low_wall` or `flat`):
+parameter: `low_wall` or `flat`, or one of the worlds in [Other worlds](#other-worlds)):
 
 ```bash
 ros2 run elevation_map_publisher elevation_map_publisher_node
@@ -160,6 +160,34 @@ the low-wall scenario goal (Python GOAL (4.5, 2.5) → world (4.0, 0.0)):
 ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 "{header: {frame_id: 'world'}, pose: {position: {x: 4.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
 ```
+
+### Other worlds
+
+Five more worlds mirror the maps in `hopcopter-ballistic-planning/maps/`. Each Gazebo world
+(Terminal 1, `-w`) has a matching elevation map scenario (Terminal 5); run the two together.
+Each map is shifted so its Python `START` sits at world (0, 0), where the robot spawns, so
+Terminal 1 keeps `-x 0 -y 0`. The goal is the Python `GOAL` in world coordinates.
+
+| World | Terminal 1 `-w` | Terminal 5 `--ros-args -p scenario:=` | Goal (x, y) |
+|---|---|---|---|
+| Stairs | `crazysim_stairs` | `stairs` | (4.0, −2.0) |
+| Stairs with curbs | `crazysim_stairs_with_curb` | `stairs_with_curb` | (4.0, 0.0) |
+| 30° slope | `crazysim_slope_30deg` | `slope_30deg` | (4.25, −2.0) |
+| Cliff gap | `crazysim_cliff_gap` | `cliff_gap` | (9.5, 0.5) |
+| Maze | `crazysim_maze` | `maze` | (14.0, 0.0) |
+
+For example, the stairs:
+
+```bash
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_stairs
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=stairs
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 4.0, y: -2.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+`stairs`, `stairs_with_curb` and `cliff_gap` are edited from the Python maps so the planner can
+plan them for the robot (see `CHANGELOG.md`); `slope_30deg` and `maze` are unchanged. The two
+15 m maps (`cliff_gap`, `maze`) take about 20 s to plan; the robot hops in place meanwhile.
 
 The planner logs the hop table (takeoff angle, speeds, injected energy per
 hop) and writes `ballistic_path_*.csv` / `ballistic_hops_*.csv` to

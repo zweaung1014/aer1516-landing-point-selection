@@ -159,6 +159,30 @@
   hopcopter's `hop_tracking/hopcopter_*.csv` (there it is the target that sized that arc's
   push; blank for startup arcs), and after `apex_drop` in `ballistic_hops_*.csv`.
   `ballistic_path_*.csv` z now matches the published marker z.
+- **Five more test worlds**, mirroring `hopcopter-ballistic-planning/maps/`: `elevation_map_publisher`
+  scenarios `stairs`, `stairs_with_curb`, `slope_30deg`, `cliff_gap` and `maze`, each with a
+  Gazebo twin `worlds/crazysim_<scenario>.sdf`. Each map is placed so its reference `START` is
+  world (0, 0), where the robot spawns (origin = −START), and sets its own default size (the
+  cliff gap and maze are 15 × 5 m). The README's "Other worlds" table lists the commands and goals.
+  Each map's published cells equal its world's top surface at every cell center, and each
+  reference goal plans with the real nodes. With the robot's planner (`robot_params()`), three
+  reference maps have no plan the controller can fly, so they were edited until they had one:
+  - **stairs:** no path with 0.6 m risers on 0.3 m treads (nor 0.5 or 0.4 m risers on 0.3–0.5 m
+    treads, nor 0.6 m on 0.6 m). Now four 0.4 m risers on 0.6 m treads from x 2.0 → 1.5
+    (reference frame), so the top is 1.6 m instead of 3.0 m. 10 waypoints, 4.8 s.
+  - **stairs_with_curb:** no path at any curb rise from 0.2 to 0.6 m on 0.4 m treads. A curb
+    stands above the tread on both sides of it, and the inflated field (0.33 m) puts it under the
+    end of every arc landing on a tread. Now 0.15 m curbs on 1.0 m treads from x 1.2. The planner
+    lands on the curbs themselves, which at 0.15 m are not steep edges. Curbs of 0.2 m or more
+    still fail, except 0.2 m curbs with 0.3 m (not 0.4 m) between treads, which needs a 12-hop
+    plan that pumps speed in place. 10 waypoints, 3.5 s.
+  - **cliff_gap:** the 1.5 m gap plans, but the 1.9 m hop across it falls below the controller's
+    40° leg guard at η 0.71 (39.5°). Now a 1.0 m gap (x 6.5–7.5); a 1.2 m gap gives the same
+    failing plan. 14 waypoints, 21 s. Its descending 0.6 m steps are unchanged; a goal on the far
+    ground plans around them through the side margin.
+  - **slope_30deg** (10 waypoints, 7.2 s) and **maze** (10 waypoints, 20 s, around the wall) are
+    unchanged, except that a maze pole is the 2 × 2 cells inside its 0.2 m footprint
+    (`set_obstacle_region` rounds out to 3–4 cells). Maze poles are 3 m tall in Gazebo.
 
 ### Changed
 - **hopcopter's stance model is refit** (stage 4, verify step 2; `HopModel`):

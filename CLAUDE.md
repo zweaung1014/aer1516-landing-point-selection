@@ -199,7 +199,10 @@ solves the takeoff, and commands the landing attitude as roll/pitch. Each decisi
 
 **3. `elevation_map_publisher_node`** (`elevation_map_publisher/`) publishes the **known** 2.5D
 map on `/elevation_map` (`grid_map_msgs/GridMap`, transient_local so late subscribers still get
-it). The scenario is selectable by parameter (`low_wall` or `flat`). `ballistic_planner_node`
+it). The scenario is selectable by parameter: `low_wall`, `flat`, or `stairs`,
+`stairs_with_curb`, `slope_30deg`, `cliff_gap`, `maze`, which mirror the reference maps (all but the slope
+and maze edited so the robot can plan them) and each have a Gazebo twin `worlds/crazysim_<scenario>.sdf`,
+placed so the reference START is world (0, 0). The README's "Other worlds" table has the goals. `ballistic_planner_node`
 cannot plan without it. `hopcopter` caches it too: the ground under each predicted touchdown and
 takeoff, and the clearance re-check. LiDAR-based map building is future work.
 

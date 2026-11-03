@@ -54,6 +54,9 @@ Use the 7 terminals from `README.md` ("Running the Simulation"), with two change
 | low_wall | `-w crazysim_low_wall` (as in the README) | `ros2 run elevation_map_publisher elevation_map_publisher_node` |
 | flat | `-w crazysim_default` | `ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=flat` |
 
+The other five worlds (stairs, curbs, slope, cliff gap, maze) and their goals are in the README's
+"Other worlds" table.
+
 **Terminal 7 (hopcopter):** its terminal is flooded with `At RPYT_commands` prints. To see only
 the useful lines, start it like this instead:
 

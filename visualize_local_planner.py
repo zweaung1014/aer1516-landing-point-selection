@@ -29,7 +29,9 @@ from matplotlib.cm import ScalarMappable
 # CONFIG
 # ──────────────────────────────────────────────────────────────────────
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-LOCAL_PLANNER_DIR = os.path.join(REPO_ROOT, "data", "data_local_planner")
+LOCAL_PLANNER_DIR = os.path.expanduser(
+    "~/OneDrive - University of Toronto/RIS_lab/Master_Thesis_Report/data/local_planner_output"
+)
 
 
 # ──────────────────────────────────────────────────────────────────────

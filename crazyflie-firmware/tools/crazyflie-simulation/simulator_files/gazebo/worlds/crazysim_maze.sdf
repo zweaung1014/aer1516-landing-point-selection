@@ -131,22 +131,58 @@
       </link>
     </model>
 
-    <!-- Twin of elevation_map_publisher scenario:=maze (maps/maze.py, unchanged). Map
-         15 x 5 m from (-0.5, -2.5). A 0.5 m wall at x 6.85-7.15, y -1.5 to 1.5, and 17
-         poles of 0.2 x 0.2 m (3 m tall here; obstacles, infinitely tall, in the map).
-         Reference goal (14.0, 0.0). -->
+    <!-- Twin of elevation_map_publisher scenario:=maze (maps/maze.py). Map 15 x 5 m
+         from (-0.5, -2.5). A 3 m corridor (y -1.5 to 1.5) between two 0.2 m side walls
+         at y +-1.6 along the whole map (2 m tall and see-through here; obstacles,
+         infinitely tall, in the map). A 0.5 m wall at x 6.85-7.15 across the full map
+         width, and 17 poles of 0.2 x 0.2 m (3 m tall here; obstacles, infinitely tall,
+         in the map). Reference goal (14.0, 0.0). -->
     <model name="wall">
       <static>true</static>
       <pose>7.0000 0.0000 0.2500 0 0.000000 0</pose>
       <link name="link">
         <collision name="collision">
-          <geometry><box><size>0.3000 3.0000 0.5000</size></box></geometry>
+          <geometry><box><size>0.3000 5.0000 0.5000</size></box></geometry>
         </collision>
         <visual name="visual">
-          <geometry><box><size>0.3000 3.0000 0.5000</size></box></geometry>
+          <geometry><box><size>0.3000 5.0000 0.5000</size></box></geometry>
           <material>
             <ambient>0.5 0.5 0.5 1</ambient>
             <diffuse>0.5 0.5 0.5 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="side_wall_left">
+      <static>true</static>
+      <pose>7.0000 1.6000 1.0000 0 0.000000 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>15.0000 0.2000 2.0000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>15.0000 0.2000 2.0000</size></box></geometry>
+          <transparency>0.6</transparency>
+          <material>
+            <ambient>0.3 0.45 0.7 1</ambient>
+            <diffuse>0.3 0.45 0.7 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="side_wall_right">
+      <static>true</static>
+      <pose>7.0000 -1.6000 1.0000 0 0.000000 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>15.0000 0.2000 2.0000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>15.0000 0.2000 2.0000</size></box></geometry>
+          <transparency>0.6</transparency>
+          <material>
+            <ambient>0.3 0.45 0.7 1</ambient>
+            <diffuse>0.3 0.45 0.7 1</diffuse>
           </material>
         </visual>
       </link>

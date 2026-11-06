@@ -175,6 +175,7 @@ Terminal 1 keeps `-x 0 -y 0`. The goal is the Python `GOAL` in world coordinates
 | 30° slope | `crazysim_slope_30deg` | `slope_30deg` | (4.25, −2.0) |
 | Cliff gap | `crazysim_cliff_gap` | `cliff_gap` | (9.5, 0.5) |
 | Maze | `crazysim_maze` | `maze` | (14.0, 0.0) |
+| Lilypads | `crazysim_lilypads` (with `-z 3.4`) | `lilypads` | (11.75, 0.0) |
 
 Copy-paste commands for each world (Terminals 2–4, 6 and 7 are the same for every world).
 Send the goal after pressing **Play** and waiting for the warm-up hops.
@@ -249,9 +250,28 @@ ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 "{header: {frame_id: 'world'}, pose: {position: {x: 14.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
 ```
 
+#### Lilypads
+
+```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware): -z spawns above the 2 m start platform
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -z 3.4 -w crazysim_lilypads
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=lilypads
+
+# Goal
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 11.75, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+`lilypads` has no Python reference map. Two 2.0 m platforms 10 m apart with 20 cylindrical pads
+(1.8–2.2 m tall, r 0.35–0.75 m) between them, over ground at 0. It plans in about 4 s.
+
 `stairs`, `stairs_with_curb` and `cliff_gap` are edited from the Python maps so the planner can
-plan them for the robot (see `CHANGELOG.md`); `slope_30deg` and `maze` are unchanged. The two
-15 m maps (`cliff_gap`, `maze`) take about 20 s to plan; the robot hops in place meanwhile.
+plan them for the robot (see `CHANGELOG.md`); `slope_30deg` and `maze` match them. The maze's
+poles sit in a 3 m corridor between two side walls, and its 0.5 m wall spans the full width, so
+the robot has to hop among the poles and over the wall rather than around them. `cliff_gap` takes
+about 20 s to plan and `maze` about 7 s; the robot hops in place meanwhile.
 
 The planner logs the hop table (takeoff angle, speeds, injected energy per
 hop) and writes `ballistic_path_*.csv` / `ballistic_hops_*.csv` to

@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- **A `lilypads` world** (`elevation_map_publisher` scenario `lilypads`,
+  `worlds/crazysim_lilypads.sdf`; no reference file). Two 2.0 m platforms 10 m apart, start x
+  −1.5 to 1.0 (the robot at (0, 0)) and goal x 11.0 to 12.5 (goal (11.75, 0)), and 20 cylindrical
+  pads between them, 1.8–2.2 m tall, r 0.35–0.75 m. The map is 16 × 6 m from (−2, −3); a cell is a
+  pad when its center lies inside the pad's circle, and the world's top surface equals the map at
+  every cell center. The gaps are ground at 0, not OBSTACLE: the planner rejects any arc over an
+  OBSTACLE cell, so obstacle gaps would forbid hopping across them. The robot cannot climb 2 m out
+  of a gap, so plans stay on the pads. The goal plans in 3.4 s with 8 waypoints. Each landing is
+  on a pad, but 0.15–0.23 m inside its rim: only a pad's rim cells are unstandable, so nothing yet
+  keeps landings away from the edges.
+- **`sitl_singleagent.sh -z`**: the spawn height, 1.34128 m by default. Lilypads spawns at 3.4 m,
+  above its start platform.
 - **hopcopter solves each hop's takeoff at the apex** (stage 4 of `docs/follow_planner_plan.md`;
   `JumpLib/takeoff_solver.py`, `HopModel`). This replaces `LinearJumpingController.jumping_planning`,
   which sized each hop from the apex energy alone and aimed 15% short (`velocity_gain` 0.85). From
@@ -182,9 +194,22 @@
     ground plans around them through the side margin.
   - **slope_30deg** (10 waypoints, 7.2 s) and **maze** (10 waypoints, 20 s, around the wall) are
     unchanged, except that a maze pole is the 2 × 2 cells inside its 0.2 m footprint
-    (`set_obstacle_region` rounds out to 3–4 cells). Maze poles are 3 m tall in Gazebo.
+    (`set_obstacle_region` rounds out to 3–4 cells). Maze poles are 3 m tall in Gazebo. (The maze
+    was later redesigned; see "Changed".)
 
 ### Changed
+- **The maze makes the robot hop among its poles and over its wall instead of going around**
+  (`maps/maze.py`, `elevation_map_publisher` `maze`, `worlds/crazysim_maze.sdf`). The old plan
+  (10 waypoints) went along the open strip below the wall at world y ≈ −2, where it hardly met a
+  pole. The 17 poles are unchanged; in the reference frame:
+  - **A corridor:** infinitely tall side walls, 0.2 m thick, at y 0.8–1.0 and 4.0–4.2 along the
+    whole map, so the robot stays in y 1.0–4.0 with the poles. In Gazebo they are 2 m tall and
+    see-through. Three poles ((4.0, 4.2), (4.5, 0.8), (8.7, 4.2)) now touch a side wall.
+  - **The wall spans the full map width** (it used to stop 1 m short of each side), still 0.3 m
+    thick at x 7.35–7.65.
+  The goal (14.0, 0.0) plans in 6.6 s with 8 waypoints through the poles, and one 2.31 m hop over
+  the wall (apex 1.05 m, 3.77 J/kg of the 4 J/kg cap). The wall's middle cell is not a steep edge,
+  so the planner may land on top of it; it did on a gate layout tried along the way, not on this one.
 - **hopcopter's clearance re-check spreads only terrain edges, as the planner does**
   (`takeoff_solver.dilate`, new `steep_mask`). It used to take the highest cell within 0.33 m of
   every cell, which equals the planner's field on flat-topped obstacles but lifts a slope by its

@@ -9,6 +9,7 @@ function spawn_model() {
 	N=$2 # Cf ID
 	X=$3 # spawn x position
 	Y=$4 # spawn y position
+	Z=$5 # spawn z position
 	X=${X:=$X}
 	Y=${Y:=$Y}
 	SUPPORTED_MODELS=("crazyflie", "crazyflie_thrust_upgrade")
@@ -37,9 +38,9 @@ function spawn_model() {
 
 	python3 ${@}
 
-	echo "Spawning ${MODEL}_${N} at ${X} ${Y}"
+	echo "Spawning ${MODEL}_${N} at ${X} ${Y} ${Z}"
 
-    gz service -s /world/${world}/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 300 --req 'sdf_filename: "/tmp/'${MODEL}_${N}'.sdf", pose: {position: {x:'${X}', y:'${Y}', z: 1.34128}}, name: "'${MODEL}_${N}'", allow_renaming: 1'
+    gz service -s /world/${world}/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 300 --req 'sdf_filename: "/tmp/'${MODEL}_${N}'.sdf", pose: {position: {x:'${X}', y:'${Y}', z: '${Z}'}}, name: "'${MODEL}_${N}'", allow_renaming: 1'
 	
 	echo "starting instance $N in $(pwd)"
 	$build_path/cf2 $((19950+${N})) > out.log 2> error.log &
@@ -50,17 +51,18 @@ function spawn_model() {
 if [ "$1" == "-h" ] || [ "$1" == "--help" ]
 then
     echo "Description: This script is used to spawn a single vehicle in gazebo."
-	echo "Usage: $0 [-m <vehicle_model>] [-n <x_coordinate>] [-y <y_coordinate>] [-w <world>]"
+	echo "Usage: $0 [-m <vehicle_model>] [-n <x_coordinate>] [-y <y_coordinate>] [-z <z_coordinate>] [-w <world>]"
 	exit 1
 fi
 
-while getopts m:x:y:w: option
+while getopts m:x:y:z:w: option
 do
 	case "${option}"
 	in
 		m) VEHICLE_MODEL=${OPTARG};;
         x) X_CORD=${OPTARG};;
         y) Y_CORD=${OPTARG};;
+        z) Z_CORD=${OPTARG};;
 		w) WORLD=${OPTARG};;
 	esac
 done
@@ -68,6 +70,7 @@ done
 world=${WORLD:=crazysim_default}
 x_cord=${X_CORD:=0}
 y_cord=${Y_CORD:=0}
+z_cord=${Z_CORD:=1.34128}  # spawn height; raise it for worlds that start on a platform
 vehicle_model=${VEHICLE_MODEL:="crazyflie"}
 export CF2_SIM_MODEL=gz_${vehicle_model}
 
@@ -88,7 +91,7 @@ gz sim -s ${src_path}/tools/crazyflie-simulation/simulator_files/gazebo/worlds/$
 sleep 3
 
 n=0
-spawn_model ${vehicle_model} $(($n)) ${x_cord} ${y_cord}
+spawn_model ${vehicle_model} $(($n)) ${x_cord} ${y_cord} ${z_cord}
 
 trap "cleanup" SIGINT SIGTERM EXIT
 

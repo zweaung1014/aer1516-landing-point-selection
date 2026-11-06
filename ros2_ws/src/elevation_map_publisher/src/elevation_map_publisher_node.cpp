@@ -5,6 +5,7 @@
 // world coordinates. The others ("stairs", "stairs_with_curb", "slope_30deg",
 // "cliff_gap", "maze") are painted in their reference file's frame and placed
 // so its START sits at world (0, 0), where the robot spawns: origin = -START.
+// "lilypads" has no reference file and is painted in world coordinates.
 // Each has a Gazebo twin, worlds/crazysim_<scenario>.sdf. stairs,
 // stairs_with_curb and cliff_gap are edited from the reference files so the
 // robot's planner (robot_params()) can plan them; see CHANGELOG.md. Later this
@@ -49,6 +50,7 @@ const std::map<std::string, Scenario> kScenarios = {
   {"slope_30deg", {5.0, 5.0, -0.5, -4.5, 4.25, -2.0}},
   {"cliff_gap", {15.0, 5.0, -0.5, -2.5, 9.5, 0.5}},
   {"maze", {15.0, 5.0, -0.5, -2.5, 14.0, 0.0}},
+  {"lilypads", {16.0, 6.0, -2.0, -3.0, 11.75, 0.0}},
 };
 
 // paint_region's center-inclusion rule: lo <= v < hi, NaN unbounded.
@@ -105,18 +107,53 @@ double reference_z(const std::string & scenario, double x, double y)
     return 0.0;
   }
   if (scenario == "maze") {
-    // maps/maze.py, unchanged. Each pole is the 2 x 2 cells whose centers lie
-    // in its 0.2 m footprint (set_obstacle_region rounds out to 3-4 cells).
+    // maps/maze.py: the 17 scattered poles, a 3 m corridor (y 1.0-4.0) between
+    // two infinitely tall side walls (y 0.8-1.0 and 4.0-4.2), and the 0.5 m
+    // wall at x 7.35-7.65 across the full width. Each pole is the 2 x 2 cells
+    // whose centers lie in its 0.2 m footprint (set_obstacle_region rounds out
+    // to 3-4 cells).
     static const double poles[][2] = {
       {2.0, 1.5}, {2.5, 3.5}, {3.5, 2.5}, {4.0, 4.2}, {4.5, 0.8}, {5.5, 3.0}, {5.8, 1.5},
       {6.5, 4.0}, {6.7, 2.2}, {8.5, 2.8}, {8.7, 4.2}, {9.5, 1.5}, {10.0, 3.5}, {10.5, 2.0},
       {11.5, 4.0}, {12.0, 1.2}, {12.5, 3.0}};
+    if (in(y, 0.8, 1.0) || in(y, 4.0, 4.2)) {
+      return kObstacle;  // corridor side walls
+    }
     for (const auto & p : poles) {
       if (in(x, p[0] - 0.1, p[0] + 0.1) && in(y, p[1] - 0.1, p[1] + 0.1)) {
         return kObstacle;
       }
     }
-    return in(x, 7.35, 7.65) && in(y, 1.0, 4.0) ? 0.5 : 0.0;
+    return in(x, 7.35, 7.65) ? 0.5 : 0.0;
+  }
+  if (scenario == "lilypads") {
+    // No reference file: painted in world coordinates (world = reference +
+    // the default origin (-2, -3)), the robot starting at world (0, 0). Two
+    // 2.0 m platforms 10 m apart (start x -1.5 to 1.0, goal x 11.0 to 12.5)
+    // and 20 cylindrical pads between them, 1.8-2.2 m tall, r 0.35-0.75 m.
+    // Everything else is ground at 0: a 2 m pit, deliberately finite (an
+    // OBSTACLE there would forbid flying over it too). A cell is a pad if its
+    // center lies strictly inside the pad's circle; no cell center sits on a
+    // rim at these radii.
+    const double wx = x - 2.0, wy = y - 3.0;
+    if (in(wx, -1.5, 1.0) && in(wy, -2.0, 2.0)) {return 2.0;}   // start platform
+    if (in(wx, 11.0, 12.5) && in(wy, -1.5, 1.5)) {return 2.0;}  // goal platform
+    // {x, y, radius, top z}, rows from the start platform toward the goal.
+    static const double pads[][4] = {
+      {2.0, 0.9, 0.60, 1.8},
+      {3.4, 1.6, 0.40, 2.0}, {3.5, 0.2, 0.35, 1.9}, {3.3, -1.3, 0.75, 2.2},
+      {4.9, 1.7, 0.40, 2.1}, {4.9, 0.4, 0.70, 2.0}, {5.0, -1.3, 0.40, 1.9},
+      {6.4, 1.8, 0.40, 1.9}, {6.4, 0.6, 0.40, 2.0}, {6.4, -0.6, 0.40, 2.1}, {6.4, -1.8, 0.40, 2.0},
+      {7.8, 1.8, 0.40, 2.0}, {7.8, 0.7, 0.35, 1.9}, {7.8, -0.5, 0.40, 2.0}, {7.8, -1.7, 0.40, 2.1},
+      {9.1, 1.2, 0.40, 2.1}, {9.1, 0.0, 0.35, 2.0}, {9.1, -1.2, 0.40, 1.9},
+      {10.2, 0.6, 0.35, 2.0}, {10.2, -0.6, 0.35, 2.1}};
+    for (const auto & p : pads) {
+      const double dx = wx - p[0], dy = wy - p[1];
+      if (dx * dx + dy * dy < p[2] * p[2]) {
+        return p[3];
+      }
+    }
+    return 0.0;
   }
   throw std::invalid_argument("no reference map for scenario '" + scenario + "'");
 }

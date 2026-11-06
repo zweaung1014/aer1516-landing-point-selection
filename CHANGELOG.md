@@ -211,6 +211,24 @@
     was later redesigned; see "Changed".)
 
 ### Changed
+- **Bottom and side clearance are separate** (`ballistic_motion_planner` `robot_params()`,
+  `hopcopter`'s clearance re-check). One `min_clearance` (0.3 m) used to be both the gap the arc
+  keeps above the terrain and, with `robot_radius` (0.03 m), the sideways inflation of steep
+  edges (0.33 m). On the 0.3 m stair treads that inflation covered each whole tread, so every hop
+  had to clear the next step's height plus 0.3 m right up to its landing, and the plans had 0–3 cm
+  to spare. On 2026-11-06 a usual 9 cm short landing then needed a 0.334 m raise at the first riser,
+  over `apex_raise_max`, and the robot stopped at the stairs. Now `bottom_clearance` 0.2 m is the
+  vertical gap, and edges are inflated by `robot_radius` 0.15 m (the body to the propeller tips)
+  + `side_clearance` 0.03 m = 0.18 m; obstacle (NaN) cells are dilated by the same 0.18 m for
+  standability. ROS parameters `robot.min_clearance` → `robot.bottom_clearance` and
+  `robot.side_clearance`; snapshots carry both (the visualizer still reads old ones).
+  `PlannerParams`' defaults, `ballistic_parity_test` (byte-identical) and the reference case of
+  `ballistic_plan_check` keep one gate for both. The stairs (4, −2) now plan 10 waypoints, one
+  hop per step, with 0.03–0.16 m of apex to spare (0.07–0.16 on the risers) and a raise of at most
+  0.26 m from 10 cm short.
+  low_wall (4,0) and (4,1.5) re-plan, and `ballistic_plan_check` expects the new paths.
+- **hopcopter's `apex_raise_max` 0.3 → 0.5 m**, more room for the clearance re-check to raise a
+  hop after a short landing (the 2026-11-06 stairs run needed 0.334 m).
 - **The stairs are human stairs** (`elevation_map_publisher` `stairs`, `worlds/crazysim_stairs.sdf`).
   The four 0.4 m risers on 0.6 m treads (top 1.6 m) were each the robot's full 0.37 m standing
   height, out of scale with the stairs a robot this size would meet. Now eight 0.18 m risers on

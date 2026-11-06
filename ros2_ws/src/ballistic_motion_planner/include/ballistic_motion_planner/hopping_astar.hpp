@@ -41,7 +41,12 @@ struct PlannerParams
   double mu = 1.2;
   double robot_radius = 0.03;
   double leg_length = 0.4;
-  double min_clearance_gate = 0.5; // was 0.2
+  // Bottom clearance: the gap the foot's arc keeps above the inflated terrain.
+  double bottom_clearance = 0.5;  // was 0.2 (as min_clearance_gate)
+  // Side clearance: terrain edges are inflated sideways by robot_radius +
+  // side_clearance (and NaN cells dilated by it for standability). The
+  // reference planner uses one gate for both, so its default equals it.
+  double side_clearance = 0.5;
   double steep_grade = 1.7320508075688772;  // tan(60 deg)
   double arc_max_step = 0.05;
   // Energy chain.

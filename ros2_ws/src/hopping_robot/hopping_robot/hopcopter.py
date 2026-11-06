@@ -201,12 +201,15 @@ class hopcopter(Node):
         self._reset_attitude_pid = False
         self.hop_plan = None          # latest HopPlan
         self.path_plan = None         # the HopPlan of the current path (same stamp as its marker)
-        # Clearance re-check: the planner's test (the arc min_clearance above terrain whose edges
-        # steeper than 60 deg are dilated by robot_radius + min_clearance) for each hop from where the robot actually lands. A hop
-        # that fails it flies at the least apex that passes, plus apex_clear_margin (planned hops
-        # over a wall sit exactly on that apex), unless that is more than apex_raise_max higher.
-        self.min_clearance = 0.3      # the planner's min_clearance (D3)
-        self.robot_radius = 0.03
+        # Clearance re-check: the planner's test (the arc bottom_clearance above terrain whose edges
+        # steeper than 60 deg are dilated sideways by robot_radius + side_clearance) for each hop
+        # from where the robot actually lands. A hop that fails it flies at the least apex that
+        # passes, plus apex_clear_margin (planned hops over a wall sit exactly on that apex),
+        # unless that is more than apex_raise_max higher. All three must match the planner's
+        # robot_params().
+        self.bottom_clearance = 0.2   # the planner's bottom_clearance
+        self.side_clearance = 0.03    # the planner's side_clearance
+        self.robot_radius = 0.15      # the body to the propeller tips
         self.apex_clear_margin = 0.01
         self.apex_raise_max = 0.5
         # A hop the leg cannot fly (leg angle under 40 deg) hops in place first, at most this high
@@ -552,7 +555,7 @@ class hopcopter(Node):
             rb = (np.arange(nrows) + msg.inner_start_index) % nrows
             cb = (np.arange(ncols) + msg.outer_start_index) % ncols
             grid = self._emap_data.reshape(ncols, nrows)[np.ix_(cb, rb)].T[::-1, ::-1]
-            self._emap_field = dilate(grid, self._emap_res, self.robot_radius + self.min_clearance)
+            self._emap_field = dilate(grid, self._emap_res, self.robot_radius + self.side_clearance)
             self._emap_origin = (self._emap_cx - 0.5 * nrows * self._emap_res,
                                  self._emap_cy - 0.5 * ncols * self._emap_res)
         except Exception as e:
@@ -747,7 +750,7 @@ class hopcopter(Node):
         raised = 0.0
         if f.mode != 'pump' and j is not None and self._emap_field is not None:
             need = clearance_apex(self._emap_field, self._emap_origin, self._emap_res, foot, target,
-                                  ground_p, ground_p + dz, self.min_clearance)
+                                  ground_p, ground_p + dz, self.bottom_clearance)
             if need > f.apex:
                 raised = need + self.apex_clear_margin - h
                 if raised > self.apex_raise_max:

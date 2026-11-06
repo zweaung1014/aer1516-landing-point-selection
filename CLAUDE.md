@@ -242,9 +242,11 @@ and controller work in the world frame) but is kept for RViz and legacy consumer
   `des_pitch_deg` and of hopcopter's commands: a body tracking its command logs
   `act_pitch_deg ≈ -des_pitch_deg`. Roll has one convention.
 - **Two parameter sets in the planner.** The node's defaults (`robot_params()`: mass 0.3609,
-  η 0.77, 4 J/kg, min_clearance 0.3, momentum-aware) are not `PlannerParams`' defaults (the
-  reference planner's, for `ballistic_parity_test`). Change a node default in `robot_params()`,
-  and keep the parity test's configuration as it is.
+  η 0.77, 4 J/kg, robot_radius 0.15, bottom_clearance 0.2, side_clearance 0.03, momentum-aware)
+  are not `PlannerParams`' defaults (the reference planner's, for `ballistic_parity_test`, where
+  one gate serves as both clearances). Change a node default in `robot_params()`, and keep the
+  parity test's configuration as it is. hopcopter's `robot_radius`, `bottom_clearance` and
+  `side_clearance` (its clearance re-check) must match `robot_params()`.
 - **The SITL firmware and Gazebo plugin are built binaries.** `cf2` and
   `libgz_crazysim_plugin.so` live in `crazyflie-firmware/sitl_make/build` (gitignored); after
   changing firmware or plugin source, run `make -C crazyflie-firmware/sitl_make/build`. In

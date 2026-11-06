@@ -90,7 +90,8 @@ public:
       declare_parameter("search.bank_bins", static_cast<int64_t>(d.bank_bins)));
     p_.robot_radius = declare_parameter("robot.radius", d.robot_radius);
     p_.leg_length = declare_parameter("robot.leg_length", d.leg_length);
-    p_.min_clearance_gate = declare_parameter("robot.min_clearance", d.min_clearance_gate);
+    p_.bottom_clearance = declare_parameter("robot.bottom_clearance", d.bottom_clearance);
+    p_.side_clearance = declare_parameter("robot.side_clearance", d.side_clearance);
     p_.steep_grade = declare_parameter("clearance.steep_grade", d.steep_grade);
     p_.arc_max_step = declare_parameter("clearance.arc_max_step", d.arc_max_step);
     // momentum_aware only: the stance model (hopcopter.py's k2), the landing tilt
@@ -471,9 +472,9 @@ private:
     }
     const auto steep = map.steep_mask(p_.steep_grade, false);
     const auto standable = map.standable_mask(
-      p_.robot_radius, p_.min_clearance_gate, p_.steep_grade);
+      p_.robot_radius, p_.side_clearance, p_.steep_grade);
     const auto inflated = map.inflated_field(
-      p_.robot_radius + p_.min_clearance_gate, p_.steep_grade);
+      p_.robot_radius + p_.side_clearance, p_.steep_grade);
 
     // hop_radii[i] is the ring available when departing path[i]: the first
     // from the seeded start speed, later ones from each hop's recorded radius.
@@ -495,7 +496,8 @@ private:
       << "\"rows\": " << map.rows() << ",\n"
       << "\"cols\": " << map.cols() << ",\n"
       << "\"robot_radius\": " << p_.robot_radius << ",\n"
-      << "\"min_clearance\": " << p_.min_clearance_gate << ",\n"
+      << "\"bottom_clearance\": " << p_.bottom_clearance << ",\n"
+      << "\"side_clearance\": " << p_.side_clearance << ",\n"
       << "\"steep_grade\": " << p_.steep_grade << ",\n"
       << "\"start\": [" << robot_x_ << "," << robot_y_ << "],\n"
       << "\"goal\": [" << gx << "," << gy << "],\n";
@@ -523,7 +525,7 @@ private:
   // Per-hop side-view data. Samples come from the planner's own arc_samples
   // (same centreline, spacing and active mask clearance_floor_alpha inverts),
   // and min_clearance is Python's arc_clearance: min over active samples of
-  // foot(u) - inflated(u), the number compared against min_clearance_gate.
+  // foot(u) - inflated(u), the number compared against bottom_clearance.
   void writeHopSideViews(
     std::ostream & f,
     const ballistic::Map2D5 & map,

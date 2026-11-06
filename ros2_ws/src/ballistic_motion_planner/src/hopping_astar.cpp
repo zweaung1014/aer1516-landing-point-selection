@@ -86,7 +86,9 @@ PlannerParams robot_params()
   p.mass = 0.3609;                    // hopcopter's hop_mass
   p.eta = 0.77;                       // stage 0, in place (0.71-0.81)
   p.e_inject_max = 4.0 * p.mass;      // J: about 4 J/kg per hop
-  p.min_clearance_gate = 0.3;         // D3
+  p.robot_radius = 0.15;              // the body to the propeller tips
+  p.bottom_clearance = 0.2;           // was 0.3 (D3, as min_clearance)
+  p.side_clearance = 0.03;            // 3 cm from walls and obstacles
   p.w_energy = 0.84 * 0.8 / p.mass;   // m/J: the reference trade-off per kg (0.84 at 0.8 kg)
   p.h_initial = 0.8;                  // the warm-up apex (hopcopter's desired_rel_z)
   p.min_apex = 0.7;
@@ -110,9 +112,9 @@ HoppingAStarPlanner::HoppingAStarPlanner(
 : map_(map), p_(params)
 {
   v_g_initial_ = seed_landing_speed(p_);
-  standable_ = map_.standable_mask(p_.robot_radius, p_.min_clearance_gate, p_.steep_grade);
+  standable_ = map_.standable_mask(p_.robot_radius, p_.side_clearance, p_.steep_grade);
   normals_ = map_.surface_normals();
-  inflated_ = map_.inflated_field(p_.robot_radius + p_.min_clearance_gate, p_.steep_grade);
+  inflated_ = map_.inflated_field(p_.robot_radius + p_.side_clearance, p_.steep_grade);
   start_cell_ = map_.world_to_grid(start.first, start.second);
   goal_cell_ = map_.world_to_grid(goal.first, goal.second);
 }
@@ -347,7 +349,7 @@ std::optional<std::pair<double, Hop>> HoppingAStarPlanner::validate_and_cost(
   // (c) Clearance floor — also chooses the flown angle.
   const auto alpha_c = clearance_floor_alpha(
     cx, cy, current_z, nx, ny, neighbor_z,
-    map_, inflated_, p_.min_clearance_gate, p_.arc_max_step);
+    map_, inflated_, p_.bottom_clearance, p_.arc_max_step);
   if (!alpha_c) {
     return std::nullopt;  // centreline leaves the map
   }
@@ -563,7 +565,7 @@ std::optional<Interval> HoppingAStarPlanner::momentum_interval(
   // (c) Clearance floor.
   const auto alpha_c = clearance_floor_alpha(
     cx, cy, current_z, nx, ny, neighbor_z,
-    map_, inflated_, p_.min_clearance_gate, p_.arc_max_step);
+    map_, inflated_, p_.bottom_clearance, p_.arc_max_step);
   if (!alpha_c || *alpha_c > interval->second) {
     return std::nullopt;
   }

@@ -204,11 +204,12 @@ void print_plan(const Run & r, const PlannerParams & p)
 int main()
 {
   std::vector<Case> cases = {
-    // The plans docs/follow_planner_plan.md expects (stage 3).
+    // The plans docs/follow_planner_plan.md expects (stage 3), as re-planned after
+    // the bottom/side clearance split (robot_radius 0.15, side 0.03, bottom 0.2).
     {"low_wall (4,0)", "low_wall", 0, 0, 4.0, 0.0,
-      {{0.05, 0.05}, {1.65, 0.05}, {3.55, 0.05}, {4.05, 0.05}}},
+      {{0.05, 0.05}, {1.75, 0.05}, {3.35, 0.05}, {4.05, 0.05}}},
     {"low_wall (4,1.5)", "low_wall", 0, 0, 4.0, 1.5,
-      {{0.05, 0.05}, {1.65, 0.75}, {3.55, 1.35}, {4.05, 1.55}}},
+      {{0.05, 0.05}, {0.75, 0.35}, {1.95, 0.95}, {3.25, 1.25}, {4.05, 1.55}}},
     {"flat (4,0)", "flat", 0, 0, 4.0, 0.0,
       {{0.05, 0.05}, {1.35, 0.05}, {2.65, 0.05}, {4.05, 0.05}}},
     // The rest of the 13-case matrix.
@@ -230,7 +231,8 @@ int main()
   PlannerParams reference;  // ballistic_parity_test's configuration
   reference.h_initial = 1.0;
   reference.min_apex = 0.3;
-  reference.min_clearance_gate = 0.05;
+  reference.bottom_clearance = 0.05;
+  reference.side_clearance = 0.05;
   reference.V_g_max = std::sqrt(2.0 * reference.g * 2.0);
   reference.V_max = std::sqrt(reference.eta * reference.V_g_max * reference.V_g_max +
     2.0 * reference.e_inject_max / reference.mass);

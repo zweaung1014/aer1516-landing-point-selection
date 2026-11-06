@@ -30,6 +30,9 @@ OBSTACLE = -1.0
 def load(path):
     with open(path) as f:
         s = json.load(f)
+    # Snapshots before the bottom/side split carry one min_clearance for both
+    s.setdefault("bottom_clearance", s.get("min_clearance"))
+    s.setdefault("side_clearance", s.get("min_clearance"))
     shape = (s["rows"], s["cols"])
     s["grid"] = np.array(s["grid"], dtype=float).reshape(shape)
     s["steep"] = np.array(s["steep"], dtype=float).reshape(shape)
@@ -94,7 +97,7 @@ def draw_path_figure(s):
     ax.plot(*s["goal"], "r*", markersize=15, label="Goal")
 
     r_body = s["robot_radius"]
-    mc = s["min_clearance"]
+    mc = s["side_clearance"]
     for k, pose in enumerate((s["start"], s["goal"])):
         ax.add_patch(mpatches.Circle(
             pose, radius=r_body, fill=False, edgecolor="#1565c0",
@@ -120,7 +123,7 @@ def draw_path_figure(s):
 def draw_map_analysis(s):
     """Port of visualizer.draw_map_analysis: steep / standable / inflated."""
     extent = s["extent"]
-    reach = s["robot_radius"] + s["min_clearance"]
+    reach = s["robot_radius"] + s["side_clearance"]
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5.5))
     fig.suptitle("Map analysis", fontsize=13)
 
@@ -171,7 +174,7 @@ def draw_hop_side_view(ax, i, hop, s, z_top):
     the centreline and the hop's target apex (CoM rise above takeoff).
     """
     leg = s["leg_length"]
-    gate = s["min_clearance"]
+    gate = s["bottom_clearance"]
     X, Z, t_s, alpha = hop["X"], hop["Z"], hop["t_s"], hop["alpha_s"]
     u = np.array(hop["u"], dtype=float)
     if u.size == 0 or X < 1e-9:
@@ -264,7 +267,7 @@ def draw_side_strip(s, per_row=4):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8, frameon=False)
-    fig.suptitle(f"Side view per hop (clearance gate = {s['min_clearance']:g} m)",
+    fig.suptitle(f"Side view per hop (clearance gate = {s['bottom_clearance']:g} m)",
                  fontsize=12)
     fig.tight_layout(rect=(0, 0.1, 1, 1))
     return fig, nrows

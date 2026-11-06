@@ -37,7 +37,8 @@ int main()
   p.w_energy = 0.84;
   p.robot_radius = 0.03;
   p.leg_length = 0.4;
-  p.min_clearance_gate = 0.05;
+  p.bottom_clearance = 0.05;
+  p.side_clearance = 0.05;
   p.steep_grade = std::tan(60.0 * M_PI / 180.0);
   p.arc_max_step = 0.05;
   p.hop_scan_step = 0.1;

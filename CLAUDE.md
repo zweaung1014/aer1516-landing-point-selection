@@ -68,8 +68,8 @@ until **Play** is pressed in the Gazebo GUI. A goal then goes in either by publi
 
 There is **no test suite for the simulation**. The `test/` directories in the Python packages
 contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
-`test_waypoint_tracker.py`, `test_push_controller.py` and `test_takeoff_solver.py`. Run them with
-`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py test/test_takeoff_solver.py`.
+`test_waypoint_tracker.py`, `test_push_controller.py`, `test_takeoff_solver.py` and `test_touchdown.py`. Run them with
+`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py test/test_takeoff_solver.py test/test_touchdown.py`.
 They cover waypoint decisions, the braking tilt guard, the push cutoff, and the takeoff solve
 (each solved hop lands on its target, also under an independent step integration; the guards; the
 clearance re-check). The planner has two
@@ -192,8 +192,9 @@ Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnbo
 - **2 — stance:** foot down, inverted-pendulum swing, unpowered.
 - **3 — climbing:** powered thrust; a new hop begins here.
 
-After the apex (3 → 1) it predicts the touchdown: the odom twist rotated to world frame, the fall to
-the leg's height over the ground below at the landing tilt's g′. It then decides the waypoint,
+After the apex (3 → 1) it predicts the touchdown: the odom twist rotated to world frame, the fall at
+the landing tilt's g′ marched over the cached map (`JumpLib/touchdown.py`, every 0.2 m or 0.1 s) to
+where the foot first meets the ground, so a pad between the apex and a gap's floor is not missed. It then decides the waypoint,
 solves the takeoff, and commands the landing attitude as roll/pitch. Each decision is a row in
 `hop_tracking/apex_decisions_*.csv`, with the planned (HopPlan) and commanded values side by side.
 

@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- **hopcopter marches the fall to its touchdown** (`JumpLib/touchdown.py`, `march_touchdown`;
+  tested in `test/test_touchdown.py`). The apex prediction used to take the ground under the apex,
+  fall to it, look up the ground there and fall once more. Over a gap that first guess is the gap
+  floor, so the fall came out ~2 m too long and the pad in between was never looked at. On the
+  2026-11-05 lilypads run this put two touchdowns 0.64 and 0.76 m long on ground 0. The push
+  target (target apex + ground) then sat ~2 m low and cut at once, the solve saw a 2 m climb
+  (`blocked`, hop in place), and the robot fell short of the pad at (7.8, −0.5). Now the fall is
+  sampled every 0.2 m of travel (at most 0.1 s apart, 6–7 ground lookups per fall), stopped at the
+  first sample where the foot is at or below the ground, and the touchdown is solved in closed
+  form for that surface. A foot that meets a surface from its side is bisected to the rim and
+  flagged `edge` (warned). The lookup is now under the foot (the CoM minus the leg along the landing
+  attitude) rather than the CoM. Replaying that run's apexes: the two errors drop to 0.01 m, and the
+  others are unchanged. New `apex_decisions_*.csv` columns `td_kind`, `td_ground`, `td_steps`.
 - **A `lilypads` world** (`elevation_map_publisher` scenario `lilypads`,
   `worlds/crazysim_lilypads.sdf`; no reference file). Two 2.0 m platforms 10 m apart, start x
   −1.5 to 1.0 (the robot at (0, 0)) and goal x 11.0 to 12.5 (goal (11.75, 0)), and 20 cylindrical
@@ -198,6 +211,15 @@
     was later redesigned; see "Changed".)
 
 ### Changed
+- **The stairs are human stairs** (`elevation_map_publisher` `stairs`, `worlds/crazysim_stairs.sdf`).
+  The four 0.4 m risers on 0.6 m treads (top 1.6 m) were each the robot's full 0.37 m standing
+  height, out of scale with the stairs a robot this size would meet. Now eight 0.18 m risers on
+  0.3 m treads (a standard 7 in / 12 in step, about half the robot's height), from world x 1.0;
+  the top is 1.44 m from x 3.1 to the map edge, still y −3.5 to −0.5. 0.2 m risers on the same
+  treads have no plan. The goal (4.0, −2.0) plans in 3.9 s with 16 waypoints: one step per two
+  hops (a 0.3 m hop up a riser, then a 0.2 m hop sideways along the tread), and a last 1.0 m hop
+  up three steps. It keeps the 40° leg guard (≥ 72°) for η 0.71–0.85, with pushes ≤ 53% of
+  capacity and landing tilts ≤ 8.9°.
 - **The maze makes the robot hop among its poles and over its wall instead of going around**
   (`maps/maze.py`, `elevation_map_publisher` `maze`, `worlds/crazysim_maze.sdf`). The old plan
   (10 waypoints) went along the open strip below the wall at world y ≈ −2, where it hardly met a

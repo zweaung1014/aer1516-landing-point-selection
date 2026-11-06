@@ -42,6 +42,7 @@ from hopping_robot.JumpLib.jumping_model import InPlaneJumpingModel
 from hopping_robot.JumpLib.waypoint_tracker import WaypointTracker
 from hopping_robot.JumpLib.push_controller import PushController, push_accel
 from hopping_robot.JumpLib.takeoff_solver import HopModel, clearance_apex, dilate, tilt_of, unit
+from hopping_robot.JumpLib.touchdown import march_touchdown
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
 
@@ -224,10 +225,12 @@ class hopcopter(Node):
         self.desired_yaw = 0.0
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
-        # Ground elevation lookup from /elevation_map (_ground_elevation_at).
-        # Currently unused: hop height comes from the planner's target_apex.
+        # Ground elevation lookup from /elevation_map (_ground_elevation_at): the touchdown march,
+        # the push target's takeoff ground and the clearance re-check use it.
         self.current_ground_z = 0.0
         self._emap_data = None       # flat float array of the "elevation" layer
+        self._emap_floor = 0.0       # lowest ground on the map: the touchdown march ends there
+        self._last_td = None         # the last predicted touchdown (JumpLib/touchdown.py), logged
         self._emap_res = 0.0
         self._emap_cx = 0.0          # map center (world) x
         self._emap_cy = 0.0          # map center (world) y
@@ -421,6 +424,9 @@ class hopcopter(Node):
             # the climb that just ended: its target and the apex reached, both above the liftoff
             # CoM height; how its push ended and lasted; the state at the tick that ended it
             'climb_target', 'climb_apex', 'push_end', 'push_s', 'cut_h', 'cut_vz', 'cut_cos_tilt',
+            # this fall's touchdown march (JumpLib/touchdown.py): 'top' or 'edge' (meets a surface
+            # from its side), the ground height there, and the ground lookups it made
+            'td_kind', 'td_ground', 'td_steps',
         ])
         self.get_logger().info(f'Apex-decision CSV: {dec_csv_filename}')
 
@@ -539,6 +545,8 @@ class hopcopter(Node):
             self._emap_outer_start = msg.outer_start_index
             self._emap_inner_start = msg.inner_start_index
             self._emap_data = np.asarray(arr.data, dtype=np.float64)
+            finite = self._emap_data[np.isfinite(self._emap_data)]
+            self._emap_floor = float(finite.min()) if finite.size else self.current_ground_z
             # grid[ix, iy] with x and y increasing: grid_map's row ru = nrows - 1 - ix, col
             # cu = ncols - 1 - iy, both stored circularly from the start indices
             rb = (np.arange(nrows) + msg.inner_start_index) % nrows
@@ -678,21 +686,21 @@ class hopcopter(Node):
         R = Rotation.from_quat([self.ori_x, self.ori_y, self.ori_z, self.ori_w])
         return R.apply([self.vel_x, self.vel_y, self.vel_z])
 
-    def _predict_touchdown(self, z, v, tilt, abs_time):
-        """The current fall's touchdown, from the CoM at height z moving at world velocity v: it
-        falls to the leg's height over the ground below, tilted to the landing tilt [rad], at the
-        g' of a fall steered to that tilt. Returns the CoM touchdown (x, y), the fall height and
-        time, the arrival velocity and the ground height there."""
-        g_fall = self.hop_model.fall_g(tilt)
-        w = max(-v[2], 0.0)                      # the apex is detected a tick after it
-        ground = self._ground_elevation_at(self.pos_x, self.pos_y)
-        for _ in range(2):                       # the ground under where it lands
-            h = max(z - ground - self.leg_length * math.cos(tilt), 0.0)
-            t = (math.sqrt(w * w + 2.0 * g_fall * h) - w) / g_fall
-            self.LSE.estimation_now(v[0], v[1], t, self.pos_x, self.pos_y, abs_time)
-            ground = self._ground_elevation_at(self.LSE.landing_x, self.LSE.landing_y)
-        com = np.array([self.LSE.landing_x, self.LSE.landing_y])
-        return com, h, t, np.array([v[0], v[1], -(w + g_fall * t)]), ground
+    def _predict_touchdown(self, z, v, axis, abs_time):
+        """The current fall's touchdown, from the CoM at height z moving at world velocity v, with
+        the body z axis at touchdown `axis` (the foot lands off the CoM along it, and the fall's g'
+        depends on its tilt). The fall is marched over the cached map to where the foot first meets
+        the ground (JumpLib/touchdown.py), so a pad between the apex and a gap's floor is not
+        missed. Returns the CoM touchdown (x, y), the fall height and time, the arrival velocity
+        and the ground height there."""
+        g_fall = self.hop_model.fall_g(tilt_of(axis))
+        floor = min(self._emap_floor, self.current_ground_z)
+        td = march_touchdown((self.pos_x, self.pos_y, z), v, axis, self.leg_length, g_fall,
+                             self._ground_elevation_at, floor)
+        self._last_td = td
+        self.LSE.estimation_now(v[0], v[1], td.t, self.pos_x, self.pos_y, abs_time)
+        w = max(-v[2], 0.0)
+        return td.com, td.h, td.t, np.array([v[0], v[1], -(w + g_fall * td.t)]), td.ground
 
     def _lookahead_axis(self, j, v_land):
         """The body z axis expected at the touchdown on waypoint j, which sets where the foot lands
@@ -769,12 +777,15 @@ class hopcopter(Node):
         decided = self._touchdown_since_decision or self._decision is None
         z_land = np.array([0.0, 0.0, 1.0])
         for _ in range(2):
-            com, fall_h, fall_t, v_in, ground_p = self._predict_touchdown(z_apex, v, tilt_of(z_land),
-                                                                          abs_time)
+            com, fall_h, fall_t, v_in, ground_p = self._predict_touchdown(z_apex, v, z_land, abs_time)
             foot = com - self.leg_length * z_land[:2]
             d = self.tracker.decide(*foot) if decided else self._decision
             hop = self._solve_hop(d, foot, v_in, ground_p)
             z_land = hop['z_land']
+        if self._last_td.kind == 'edge':
+            self.get_logger().warn(
+                f"Apex: the foot is predicted to meet a surface from its side at "
+                f"({foot[0]:.2f}, {foot[1]:.2f}), ground {ground_p:.2f}")
         if decided:
             prev = self._decision
             self.tracker.apply(d)
@@ -885,6 +896,8 @@ class hopcopter(Node):
             *steer,
             *plan,
             *push,
+            *(['', '', ''] if self._last_td is None else
+              [self._last_td.kind, f4(self._last_td.ground), self._last_td.steps]),
         ])
         self.dec_csv_file.flush()
 
@@ -1094,7 +1107,8 @@ class hopcopter(Node):
                 else:
                     # Warm-up hop: fall level, in place, at the default height
                     hop = None
-                    _, fall_h, fall_t, v_in, ground = self._predict_touchdown(Z_f, v_world, 0.0, Abs_time)
+                    _, fall_h, fall_t, v_in, ground = self._predict_touchdown(
+                        Z_f, v_world, np.array([0.0, 0.0, 1.0]), Abs_time)
                     fall = (fall_h, fall_t, v_in)
                     self.LJC.roll = 0.0
                     self.LJC.pitch = 0.0

@@ -66,12 +66,14 @@ double reference_z(const std::string & scenario, double x, double y)
 {
   const double slope = std::tan(30.0 * M_PI / 180.0);
   if (scenario == "stairs") {
-    // maps/stairs.py with 0.4 m risers on 0.6 m treads (was 0.6 on 0.3 from
-    // x 2.0), four steps: the top is 1.6 m from x 3.3 to the map edge.
+    // maps/stairs.py resized to human stairs, about half the robot's 0.37 m
+    // standing height per riser: eight 0.18 m risers on 0.3 m treads from
+    // x 1.5 (was 0.6 on 0.3 from x 2.0, five steps). The top is 1.44 m from
+    // x 3.6 to the map edge.
     if (!in(y, 1.0, 4.0) || x < 1.5) {
       return 0.0;
     }
-    return 0.4 * std::min(4, 1 + static_cast<int>(std::floor((x - 1.5 + 1e-9) / 0.6)));
+    return 0.18 * std::min(8, 1 + static_cast<int>(std::floor((x - 1.5 + 1e-9) / 0.3)));
   }
   if (scenario == "stairs_with_curb") {
     // maps/stairs_with_curb.py with 0.15 m curbs on 1.0 m treads (was 0.6 m on

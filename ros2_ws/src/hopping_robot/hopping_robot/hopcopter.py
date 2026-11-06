@@ -208,7 +208,7 @@ class hopcopter(Node):
         self.min_clearance = 0.3      # the planner's min_clearance (D3)
         self.robot_radius = 0.03
         self.apex_clear_margin = 0.01
-        self.apex_raise_max = 0.3
+        self.apex_raise_max = 0.5
         # A hop the leg cannot fly (leg angle under 40 deg) hops in place first, at most this high
         self.pump_apex_max = 1.5
 

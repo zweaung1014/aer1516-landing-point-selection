@@ -65,7 +65,50 @@ def test_pad_over_a_gap():
     assert td.ground == 1.9
     assert td.t == pytest.approx(closed_form(3.0246, 0.0, 1.9))
     assert td.foot == pytest.approx([3.31, 0.31], abs=0.02)
-    assert td.steps <= 10
+    assert td.steps <= 25
+
+
+def cells(ground, res=0.1, ox=-2.0, oy=-3.0):
+    """ground() looked up at the center of its map cell, as the cached elevation map is."""
+    def at(x, y):
+        return ground(ox + (math.floor((x - ox) / res) + 0.5) * res,
+                      oy + (math.floor((y - oy) / res) + 0.5) * res)
+    return at
+
+
+@pytest.mark.parametrize('ds', [0.05, 0.2])
+def test_far_rim_of_a_pad(ds):
+    """Apex 7 of the 2026-11-06 lilypads run: the foot reached the top of the pad at (7.8, -0.5)
+    2 cm inside its far rim, between two samples 0.2 m apart (8 cm above the pad at x 8.10, over
+    the gap at x 8.30). The march went on to the gap floor at x 9.0; the robot landed at CoM x
+    8.13 on the pad. Found now at either step, since it no longer depends on where samples fall."""
+    ground = cells(pads((6.4, -0.6, 0.4, 2.1), (7.8, -0.5, 0.4, 2.0), (9.1, -1.2, 0.4, 1.9),
+                        (9.1, 0.0, 0.35, 2.0), (10.2, -0.6, 0.35, 2.1)))
+    axis = np.array([-0.1093, 0.0302, 0.9936])
+    td = march_touchdown((7.2735, -0.4065, 3.117), (2.2389, -0.2765, -0.1104), axis, LEG, G,
+                         ground, 0.0, ds=ds)
+    assert (td.kind, td.ground) == ('top', 2.0)
+    assert td.com == pytest.approx([8.133, -0.512], abs=0.01)
+    assert td.foot[0] < 8.2                    # the pad's last cell ends at x 8.2
+
+
+def test_far_rim_onto_lower_ground():
+    """The same miss where the ground beyond the rim is only a little lower: at the next sample
+    the foot is already below that ground too, but it landed on the higher surface first."""
+    ground = lambda x, y: 2.0 if x < 1.0 else 1.9      # noqa: E731
+    z0 = 2.0 + LEG + 0.3
+    t = closed_form(z0, 0.0, 2.0)
+    vx = (1.0 - 0.02) / t                    # the foot reaches 2.0 m 2 cm before the rim
+    td = march_touchdown((0.0, 0.0, z0), (vx, 0.0, 0.0), UP, LEG, G, ground, 0.0, ds=0.2)
+    assert (td.kind, td.ground) == ('top', 2.0)
+    assert td.t == pytest.approx(t)
+
+
+def test_falls_off_a_rim():
+    """Past the rim before the foot gets down to the pad's top: no touchdown on it."""
+    ground = pads((0.0, 0.0, 0.4, 2.0))
+    td = march_touchdown((0.0, 0.0, 3.0), (2.0, 0.0, 0.0), UP, LEG, G, ground, 0.0)
+    assert (td.kind, td.ground) == ('top', 0.0)
 
 
 def test_step_up_and_down():
@@ -96,11 +139,11 @@ def test_side_of_a_pad():
 
 
 def test_steps_stay_sparse():
-    """A long fall at speed stays at one lookup per 0.2 m of travel (or per 0.1 s), plus the
+    """A long fall at speed stays at one lookup per 0.05 m of travel (or per 0.1 s), plus the
     refinement."""
     for v in [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (3.0, 1.0, 0.0), (6.0, 0.0, 0.0)]:
         z0 = 3.4
         td = march_touchdown((0.0, 0.0, z0), v, UP, LEG, G, flat(0.0), 0.0)
         t = closed_form(z0, 0.0, 0.0)
-        n = math.ceil(t / min(0.1, 0.2 / max(math.hypot(v[0], v[1]), 1e-9)))
+        n = math.ceil(t / min(0.1, 0.05 / max(math.hypot(v[0], v[1]), 1e-9)))
         assert td.steps <= n + 3

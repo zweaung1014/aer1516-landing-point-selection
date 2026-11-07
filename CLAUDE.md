@@ -193,7 +193,7 @@ Control runs on a 100 Hz timer (`RPYT_commands`) around `JumpingStateTrackerOnbo
 - **3 — climbing:** powered thrust; a new hop begins here.
 
 After the apex (3 → 1) it predicts the touchdown: the odom twist rotated to world frame, the fall at
-the landing tilt's g′ marched over the cached map (`JumpLib/touchdown.py`, every 0.2 m or 0.1 s) to
+the landing tilt's g′ marched over the cached map (`JumpLib/touchdown.py`, every 0.05 m or 0.1 s, also checking each surface it passes the far rim of) to
 where the foot first meets the ground, so a pad between the apex and a gap's floor is not missed. It then decides the waypoint,
 solves the takeoff, and commands the landing attitude as roll/pitch. Each decision is a row in
 `hop_tracking/apex_decisions_*.csv`, with the planned (HopPlan) and commanded values side by side.

@@ -8,11 +8,18 @@ ground under it.
 Guessing the ground first (under the apex), falling to it, and looking up the ground there misses
 every surface in between: over a gap the guess is the gap floor, the fall comes out ~2 m too
 long, and the pad the robot actually lands on is never looked at. So instead the fall is sampled
-sparsely, every `ds` of horizontal travel (at most `dt_max` apart), and stopped at the first
-sample where the foot is at or below the ground. One closed-form solve then gives the exact time
-the foot reaches that surface's height. If that time falls where the ground under the foot is
-still lower, the foot reaches the surface from the side (its rim), and a short bisection finds
-where.
+every `ds` of horizontal travel (at most `dt_max` apart; `ds` is half a map cell, so no cell is
+stepped over), and stopped at the first sample where the foot is at or below the ground. One
+closed-form solve then gives the exact time the foot reaches that surface's height. If that time
+falls where the ground under the foot is still lower, the foot reaches the surface from the side
+(its rim), and a short bisection finds where.
+
+A foot can also reach a surface's top between two samples and pass its far rim before the next:
+at the next sample it is above the lower ground beyond, and the surface is never seen. So whenever
+the ground drops from one sample to the next, the closed form is also solved for the previous
+sample's surface, and if the foot is still over that surface when it gets down to it, that is the
+touchdown. (2026-11-06 lilypads run: the foot landed 2 cm inside the far rim of the pad at
+(7.8, -0.5), between samples 0.2 m apart, and the march went on to the gap floor 0.8 m further.)
 
 Plain Python, so it can be unit-tested without ROS."""
 
@@ -37,7 +44,7 @@ class Touchdown:
     steps: int
 
 
-def march_touchdown(p, v, axis, leg, g_fall, ground_at, z_floor, ds=0.2, dt_max=0.1,
+def march_touchdown(p, v, axis, leg, g_fall, ground_at, z_floor, ds=0.05, dt_max=0.1,
                     n_bisect=3):
     """The touchdown of a fall from CoM p = (x, y, z) at world velocity v.
 
@@ -74,14 +81,20 @@ def march_touchdown(p, v, axis, leg, g_fall, ground_at, z_floor, ds=0.2, dt_max=
     if fz0 <= g0:                              # already at the ground (degenerate)
         return result(0.0, g0, 'top', steps)
     t_end = t_to(min(z_floor, g0))
-    t_prev = 0.0
+    t_prev, g_prev = 0.0, g0
     while True:
         t = min(t_prev + dt, t_end)
         g = ground_at(*foot_at(t))
         steps += 1
+        if g < g_prev:                         # the ground dropped: did the foot land before it?
+            ts = t_to(g_prev)
+            if t_prev < ts <= t:
+                steps += 1
+                if abs(ground_at(*foot_at(ts)) - g_prev) < 1e-6:
+                    return result(ts, g_prev, 'top', steps)
         if fz(t) <= g or t >= t_end:
             break
-        t_prev = t
+        t_prev, g_prev = t, g
     # The foot reached a surface of height g between t_prev and t
     ts = t_to(g)
     if t_prev <= ts <= t:

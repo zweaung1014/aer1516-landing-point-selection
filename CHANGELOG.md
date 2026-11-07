@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The touchdown march no longer misses a pad landed on near its far rim**
+  (`JumpLib/touchdown.py`; `test_far_rim_of_a_pad`, `test_far_rim_onto_lower_ground`,
+  `test_falls_off_a_rim`). The march only stopped at a sample where the foot was at or below the
+  ground. A foot that reached a pad's top between two samples and passed its far rim before the
+  next was above the gap at that sample, so the pad was skipped. On the 2026-11-06 lilypads run
+  the foot landed 2 cm inside the far rim of the pad at (7.8, −0.5): 8 cm above the pad at the
+  x 8.10 sample, over the gap at x 8.30. The march went on to the gap floor (touchdown x 9.0,
+  2.75 m fall, 7.2 m/s arrival) while the robot landed at x 8.13. The takeoff was solved from the
+  gap floor, the push target (0.8 m above ground 0) sat below the pad, so the hop off it was
+  leg-only, landed on the near rim of the pad at (10.2, −0.6), and the robot flipped there. Now,
+  whenever the ground drops from one sample to the next, the closed form is also solved for the
+  previous sample's surface, and if the foot is still over it at that time, that is the touchdown.
+  The sample spacing `ds` is 0.05 m (was 0.2 m), half a map cell, so no cell is stepped over; at
+  ~20 lookups per fall the cost is negligible. Replaying that apex: CoM touchdown x 8.137 against
+  8.133 measured. The old march misses it at 0.05 m too; the rim check is the fix.
+
 ### Added
 - **hopcopter marches the fall to its touchdown** (`JumpLib/touchdown.py`, `march_touchdown`;
   tested in `test/test_touchdown.py`). The apex prediction used to take the ground under the apex,

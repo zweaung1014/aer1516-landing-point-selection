@@ -20,6 +20,26 @@
   8.133 measured. The old march misses it at 0.05 m too; the rim check is the fix.
 
 ### Added
+- **A `slanted_pads` world** (`elevation_map_publisher` scenario `slanted_pads`,
+  `worlds/crazysim_slanted_pads.sdf`; no reference file).
+  - **Layout.** The map is 19 × 6 m from (−2, −3). The start platform is the one from lilypads
+    (x −1.5 to 1.0, z 2.0, robot at (0, 0), spawn `-z 3.4`). The goal platform is at x 15.1–16.6,
+    with the goal at (15.85, 0).
+  - **Pads.** Seven 1 × 1 m pads, sloped 12–20°, with every top within 2.0 ± 0.2 m:
+    - six in two columns (y 0.3…1.3 and −1.3…−0.3) that face each other, each low on its inner
+      edge;
+    - a last pad C at y 0, low toward −x.
+  - **The stagger forces the zigzag.** Consecutive pads are 1.9 m apart in x, so two pads in one
+    column (and start→R1, L3→C, R3→goal) are 2.8 m apart edge to edge, past the ~2.4 m longest
+    hop. The momentum-aware plan goes start → L1 → R1 → L2 → R2 → L3 → R3 → C → goal: 10
+    waypoints, 3.6 s, hops of 0.76–2.33 m, landing tilts 3.6–19.3° against the 20° cap.
+  - **The slopes are not edges.** At most 0.36 m rise per m, against steep_grade's 1.73, so only
+    the pad rims are unstandable.
+  - **Gazebo build.** Each pad is a 0.05 m box tilted so its top face is the map's plane, on five
+    vertical support strips. The map equals that plane at every cell center (checked against the
+    planner's snapshot grid to 1e-7 m).
+  - **Untested in flight.** hopcopter's stance model was measured on flat ground, so landings on
+    these slopes may turn the robot differently than it predicts.
 - **hopcopter marches the fall to its touchdown** (`JumpLib/touchdown.py`, `march_touchdown`;
   tested in `test/test_touchdown.py`). The apex prediction used to take the ground under the apex,
   fall to it, look up the ground there and fall once more. Over a gap that first guess is the gap

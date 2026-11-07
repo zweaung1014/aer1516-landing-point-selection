@@ -5,7 +5,8 @@
 // world coordinates. The others ("stairs", "stairs_with_curb", "slope_30deg",
 // "cliff_gap", "maze") are painted in their reference file's frame and placed
 // so its START sits at world (0, 0), where the robot spawns: origin = -START.
-// "lilypads" has no reference file and is painted in world coordinates.
+// "lilypads" and "slanted_pads" have no reference file and are painted in
+// world coordinates.
 // Each has a Gazebo twin, worlds/crazysim_<scenario>.sdf. stairs,
 // stairs_with_curb and cliff_gap are edited from the reference files so the
 // robot's planner (robot_params()) can plan them; see CHANGELOG.md. Later this
@@ -51,6 +52,7 @@ const std::map<std::string, Scenario> kScenarios = {
   {"cliff_gap", {15.0, 5.0, -0.5, -2.5, 9.5, 0.5}},
   {"maze", {15.0, 5.0, -0.5, -2.5, 14.0, 0.0}},
   {"lilypads", {16.0, 6.0, -2.0, -3.0, 11.75, 0.0}},
+  {"slanted_pads", {19.0, 6.0, -2.0, -3.0, 15.85, 0.0}},
 };
 
 // paint_region's center-inclusion rule: lo <= v < hi, NaN unbounded.
@@ -153,6 +155,40 @@ double reference_z(const std::string & scenario, double x, double y)
       const double dx = wx - p[0], dy = wy - p[1];
       if (dx * dx + dy * dy < p[2] * p[2]) {
         return p[3];
+      }
+    }
+    return 0.0;
+  }
+  if (scenario == "slanted_pads") {
+    // No reference file: painted in world coordinates (world = reference +
+    // the default origin (-2, -3)), the robot starting at world (0, 0). Two
+    // 2.0 m platforms (start x -1.5 to 1.0, goal x 15.1 to 16.6) and seven
+    // 1 x 1 m sloped pads between them in two columns that face each other:
+    // each column pad is low on its inner edge (toward y 0), the last pad C
+    // low on its -x edge. Every top stays within 2.0 +- 0.2 m. Consecutive
+    // pads are 1.9 m apart in x, so two pads of one column are 2.8 m apart
+    // edge to edge, past the longest hop (~2.4 m): the plan has to zigzag.
+    // Everything else is ground at 0, a finite 2 m pit as in lilypads. Edges
+    // are multiples of 0.1, so no cell center sits on one. The Gazebo twin
+    // (crazysim_slanted_pads.sdf) builds each top as a tilted slab whose top
+    // face is this plane.
+    const double wx = x - 2.0, wy = y - 3.0;
+    if (in(wx, -1.5, 1.0) && in(wy, -2.0, 2.0)) {return 2.0;}   // start platform
+    if (in(wx, 15.1, 16.6) && in(wy, -1.5, 1.5)) {return 2.0;}  // goal platform
+    // {x_lo, x_hi, y_lo, y_hi, mid z, slope deg, axis (0 x, 1 y), sign}:
+    // z = mid + sign * tan(slope) * (coordinate along axis - pad center).
+    static const double pads[][8] = {
+      {1.8, 2.8, 0.3, 1.3, 2.00, 15.0, 1, +1},     // L1
+      {3.7, 4.7, -1.3, -0.3, 2.05, 12.0, 1, -1},   // R1
+      {5.6, 6.6, 0.3, 1.3, 1.98, 18.0, 1, +1},     // L2
+      {7.5, 8.5, -1.3, -0.3, 2.00, 20.0, 1, -1},   // R2
+      {9.4, 10.4, 0.3, 1.3, 2.03, 14.0, 1, +1},    // L3
+      {11.3, 12.3, -1.3, -0.3, 1.97, 16.0, 1, -1}, // R3
+      {13.2, 14.2, -0.5, 0.5, 2.00, 15.0, 0, +1}};  // C
+    for (const auto & p : pads) {
+      if (in(wx, p[0], p[1]) && in(wy, p[2], p[3])) {
+        const double u = p[6] == 0 ? wx - 0.5 * (p[0] + p[1]) : wy - 0.5 * (p[2] + p[3]);
+        return p[4] + p[7] * std::tan(p[5] * M_PI / 180.0) * u;
       }
     }
     return 0.0;

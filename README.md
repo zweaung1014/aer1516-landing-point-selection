@@ -176,6 +176,7 @@ Terminal 1 keeps `-x 0 -y 0`. The goal is the Python `GOAL` in world coordinates
 | Cliff gap | `crazysim_cliff_gap` | `cliff_gap` | (9.5, 0.5) |
 | Maze | `crazysim_maze` | `maze` | (14.0, 0.0) |
 | Lilypads | `crazysim_lilypads` (with `-z 3.4`) | `lilypads` | (11.75, 0.0) |
+| Slanted pads | `crazysim_slanted_pads` (with `-z 3.4`) | `slanted_pads` | (15.85, 0.0) |
 
 Copy-paste commands for each world (Terminals 2–4, 6 and 7 are the same for every world).
 Send the goal after pressing **Play** and waiting for the warm-up hops.
@@ -266,6 +267,31 @@ ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 
 `lilypads` has no Python reference map. Two 2.0 m platforms 10 m apart with 20 cylindrical pads
 (1.8–2.2 m tall, r 0.35–0.75 m) between them, over ground at 0. It plans in about 4 s.
+
+#### Slanted pads
+
+```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware): -z spawns above the 2 m start platform
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -z 3.4 -w crazysim_slanted_pads
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=slanted_pads
+
+# Goal
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 15.85, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+`slanted_pads` has no Python reference map. It has the lilypads start platform (2.0 m) and a
+goal platform at x 15.1–16.6. Between them are seven 1 × 1 m pads sloped 12–20°, with every top
+within 2.0 ± 0.2 m, over ground at 0:
+- six pads in two columns (y 0.3…1.3 and −1.3…−0.3) that face each other, each low on its inner
+  edge;
+- a last pad C at y 0, low toward the start.
+
+Consecutive pads are 1.9 m apart in x, so two pads in one column are 2.8 m apart, past the
+longest hop. The plan zigzags start → L1 → R1 → L2 → R2 → L3 → R3 → C → goal: 9 hops of 0.8–2.3 m
+with landing tilts up to 19°. It plans in about 4 s.
 
 `stairs`, `stairs_with_curb` and `cliff_gap` are edited from the Python maps so the planner can
 plan them for the robot (see `CHANGELOG.md`); `slope_30deg` and `maze` match them. The maze's

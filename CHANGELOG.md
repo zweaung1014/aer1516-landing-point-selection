@@ -20,6 +20,19 @@
   8.133 measured. The old march misses it at 0.05 m too; the rim check is the fix.
 
 ### Added
+- **A `floating_platforms` world** (`elevation_map_publisher` scenario `floating_platforms`,
+  `worlds/crazysim_floating_platforms.sdf`; no reference file). The map is 8.5 × 8 m from
+  (−1.5, −3). The robot starts on the ground at (0, 0) with the default spawn height. Thirteen
+  floating 0.1 m slabs, 0.8–1.2 m on a side, with edges on multiples of 0.1 m:
+  - a route A–I spirals up to the 3.0 m top at (5.6, 1.0), the goal. Its rises are irregular:
+    0.35, 0.40, −0.15 (C), 0.45, 0.35, 0.25, 0.45, 0.15, 0.35, 0.40;
+  - three dead ends at 0.50, 1.00 and 2.40 m.
+
+  The rises are sized to what one hop can climb. Offline, the planner climbs 0.7 m from flat
+  ground only after three pumping hops in place, and fails at 0.9 m. The momentum-aware plan
+  skips C (B → D, a 1.79 m hop): 17 waypoints, 16 hops of 0.10–1.79 m, landing tilts up to 19.5°,
+  31.9 s, 60757 expansions. In the 2.5D map each slab is a column to the ground. Untested in
+  flight.
 - **A `slanted_pads` world** (`elevation_map_publisher` scenario `slanted_pads`,
   `worlds/crazysim_slanted_pads.sdf`; no reference file).
   - **Layout.** The map is 19 × 6 m from (−2, −3). The start platform is the one from lilypads

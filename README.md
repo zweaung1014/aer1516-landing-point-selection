@@ -177,6 +177,7 @@ Terminal 1 keeps `-x 0 -y 0`. The goal is the Python `GOAL` in world coordinates
 | Maze | `crazysim_maze` | `maze` | (14.0, 0.0) |
 | Lilypads | `crazysim_lilypads` (with `-z 3.4`) | `lilypads` | (11.75, 0.0) |
 | Slanted pads | `crazysim_slanted_pads` (with `-z 3.4`) | `slanted_pads` | (15.85, 0.0) |
+| Floating platforms | `crazysim_floating_platforms` | `floating_platforms` | (5.6, 1.0) |
 
 Copy-paste commands for each world (Terminals 2–4, 6 and 7 are the same for every world).
 Send the goal after pressing **Play** and waiting for the warm-up hops.
@@ -292,6 +293,28 @@ within 2.0 ± 0.2 m, over ground at 0:
 Consecutive pads are 1.9 m apart in x, so two pads in one column are 2.8 m apart, past the
 longest hop. The plan zigzags start → L1 → R1 → L2 → R2 → L3 → R3 → C → goal: 9 hops of 0.8–2.3 m
 with landing tilts up to 19°. It plans in about 4 s.
+
+#### Floating platforms
+
+```bash
+# Terminal 1 (in ~/CrazySim/crazyflie-firmware): the robot starts on the ground
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_floating_platforms
+
+# Terminal 5 (in ~/CrazySim/ros2_ws)
+ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=floating_platforms
+
+# Goal
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+"{header: {frame_id: 'world'}, pose: {position: {x: 5.6, y: 1.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+`floating_platforms` has no Python reference map. Thirteen floating 0.8–1.2 m slabs (0.1 m thick)
+climb from the ground to a 3.0 m top at (5.6, 1.0). Ten form a spiral route with irregular rises
+of 0.15–0.45 m, one of them lower than the platform before it; three are dead ends. The plan
+takes 16 hops, pumping in place before the bigger rises, and skips the low platform C. It takes
+about 32 s to plan; the robot hops in place meanwhile. The map treats each platform as a column
+to the ground, so the planner never routes under one. Use the known map: the upside-down LiDAR
+cannot see platform tops above it.
 
 `stairs`, `stairs_with_curb` and `cliff_gap` are edited from the Python maps so the planner can
 plan them for the robot (see `CHANGELOG.md`); `slope_30deg` and `maze` match them. The maze's

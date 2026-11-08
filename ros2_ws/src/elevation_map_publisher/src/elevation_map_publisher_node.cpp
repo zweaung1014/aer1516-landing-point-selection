@@ -5,8 +5,8 @@
 // world coordinates. The others ("stairs", "stairs_with_curb", "slope_30deg",
 // "cliff_gap", "maze") are painted in their reference file's frame and placed
 // so its START sits at world (0, 0), where the robot spawns: origin = -START.
-// "lilypads" and "slanted_pads" have no reference file and are painted in
-// world coordinates.
+// "lilypads", "slanted_pads" and "floating_platforms" have no reference file
+// and are painted in world coordinates.
 // Each has a Gazebo twin, worlds/crazysim_<scenario>.sdf. stairs,
 // stairs_with_curb and cliff_gap are edited from the reference files so the
 // robot's planner (robot_params()) can plan them; see CHANGELOG.md. Later this
@@ -53,6 +53,7 @@ const std::map<std::string, Scenario> kScenarios = {
   {"maze", {15.0, 5.0, -0.5, -2.5, 14.0, 0.0}},
   {"lilypads", {16.0, 6.0, -2.0, -3.0, 11.75, 0.0}},
   {"slanted_pads", {19.0, 6.0, -2.0, -3.0, 15.85, 0.0}},
+  {"floating_platforms", {8.5, 8.0, -1.5, -3.0, 5.6, 1.0}},
 };
 
 // paint_region's center-inclusion rule: lo <= v < hi, NaN unbounded.
@@ -189,6 +190,41 @@ double reference_z(const std::string & scenario, double x, double y)
       if (in(wx, p[0], p[1]) && in(wy, p[2], p[3])) {
         const double u = p[6] == 0 ? wx - 0.5 * (p[0] + p[1]) : wy - 0.5 * (p[2] + p[3]);
         return p[4] + p[7] * std::tan(p[5] * M_PI / 180.0) * u;
+      }
+    }
+    return 0.0;
+  }
+  if (scenario == "floating_platforms") {
+    // No reference file: painted in world coordinates (world = reference +
+    // the default origin (-1.5, -3)), the robot starting on the ground at
+    // world (0, 0). Thirteen floating rectangular platforms (0.1 m slabs in
+    // the Gazebo twin, crazysim_floating_platforms.sdf) climbing to the 3.0 m
+    // top at (5.6, 1.0), the goal. The route spirals up through ten of them
+    // with irregular rises of 0.15-0.45 m (C, at 0.60 below B, is one the
+    // plan may skip); three more are dead ends. In 2.5D each platform is a
+    // column to the ground: nothing plans under one. Everything else is ground
+    // at 0. Edges are multiples of 0.1, so no cell center sits on one.
+    const double wx = x - 1.5, wy = y - 3.0;
+    // {center x, center y, size x, size y, top z}
+    static const double plats[][5] = {
+      {1.4, 0.2, 1.0, 1.0, 0.35},   // A
+      {2.6, -0.9, 1.0, 0.8, 0.75},  // B
+      {3.9, -0.3, 1.0, 0.8, 0.60},  // C
+      {3.6, 1.2, 0.8, 0.8, 1.05},   // D
+      {2.2, 1.6, 1.0, 0.8, 1.40},   // E
+      {1.0, 2.4, 0.8, 1.0, 1.65},   // F
+      {2.0, 3.4, 1.0, 0.8, 2.10},   // G
+      {3.5, 3.0, 0.8, 0.8, 2.25},   // H
+      {4.8, 2.4, 1.0, 0.8, 2.60},   // I
+      {5.6, 1.0, 1.2, 1.2, 3.00},   // TOP (goal)
+      {5.2, -1.4, 0.8, 0.8, 1.00},  // dead end X1
+      {-0.3, 3.7, 0.8, 0.8, 2.40},  // dead end X2
+      {-0.2, -1.6, 0.8, 0.8, 0.50}};  // dead end X3
+    for (const auto & p : plats) {
+      if (in(wx, p[0] - 0.5 * p[2], p[0] + 0.5 * p[2]) &&
+        in(wy, p[1] - 0.5 * p[3], p[1] + 0.5 * p[3]))
+      {
+        return p[4];
       }
     }
     return 0.0;

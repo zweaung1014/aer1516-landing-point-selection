@@ -89,6 +89,9 @@ PlannerParams robot_params()
   p.robot_radius = 0.15;              // the body to the propeller tips
   p.bottom_clearance = 0.2;           // was 0.3 (D3, as min_clearance)
   p.side_clearance = 0.03;            // 3 cm from walls and obstacles
+  p.clearance_active_tol = 0.05;      // LiDAR maps' roughness (docs/lidar_mapping_plan.md)
+  // the inflation's reach: robot_radius + side_clearance + half a cell's diagonal
+  p.clearance_start_exempt = p.robot_radius + p.side_clearance + 0.1 * std::sqrt(2.0) / 2.0;
   p.w_energy = 0.84 * 0.8 / p.mass;   // m/J: the reference trade-off per kg (0.84 at 0.8 kg)
   p.h_initial = 0.8;                  // the warm-up apex (hopcopter's desired_rel_z)
   p.min_apex = 0.7;
@@ -133,6 +136,14 @@ uint64_t HoppingAStarPlanner::make_state(int row, int col, int bin) const
   }
   return (static_cast<uint64_t>(row) * map_.cols() + col) << kBinBits |
          static_cast<uint64_t>(bin);
+}
+
+double HoppingAStarPlanner::start_exempt(int row, int col, double z) const
+{
+  // Only a takeoff inside the inflation (an obstacle or edge beside it) is
+  // exempted: elsewhere the arc reads the inflated field as the reference does.
+  return inflated_[static_cast<size_t>(row) * map_.cols() + col] > z + 1e-9 ?
+         p_.clearance_start_exempt : 0.0;
 }
 
 double HoppingAStarPlanner::heuristic(int row, int col) const
@@ -349,7 +360,8 @@ std::optional<std::pair<double, Hop>> HoppingAStarPlanner::validate_and_cost(
   // (c) Clearance floor — also chooses the flown angle.
   const auto alpha_c = clearance_floor_alpha(
     cx, cy, current_z, nx, ny, neighbor_z,
-    map_, inflated_, p_.bottom_clearance, p_.arc_max_step);
+    map_, inflated_, p_.bottom_clearance, p_.arc_max_step, p_.clearance_active_tol,
+    start_exempt(cur_row, cur_col, current_z));
   if (!alpha_c) {
     return std::nullopt;  // centreline leaves the map
   }
@@ -565,7 +577,8 @@ std::optional<Interval> HoppingAStarPlanner::momentum_interval(
   // (c) Clearance floor.
   const auto alpha_c = clearance_floor_alpha(
     cx, cy, current_z, nx, ny, neighbor_z,
-    map_, inflated_, p_.bottom_clearance, p_.arc_max_step);
+    map_, inflated_, p_.bottom_clearance, p_.arc_max_step, p_.clearance_active_tol,
+    start_exempt(cur_row, cur_col, current_z));
   if (!alpha_c || *alpha_c > interval->second) {
     return std::nullopt;
   }

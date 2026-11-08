@@ -85,9 +85,10 @@ source install/setup.bash
 
 The 2.5D ballistic hopping A* planner (C++ port of
 `hopcopter-ballistic-planning/`) plans **once** per goal on a known elevation
-map published by `elevation_map_publisher` (LiDAR-based map building comes
-later), and does not use a LiDAR bridge or TF broadcaster. **7 terminals**;
-source every terminal as above.
+map published by `elevation_map_publisher`, and does not use a LiDAR bridge or
+TF broadcaster. **7 terminals**; source every terminal as above. To build the
+map from the LiDAR instead, see
+[Running with the LiDAR map](#running-with-the-lidar-map-hopcopter_perception).
 
 ### Terminal 1 — Start Gazebo (low-wall world)
 
@@ -304,6 +305,105 @@ hop) and writes `ballistic_path_*.csv` / `ballistic_hops_*.csv` to
 `data/data_ballistic_planner/` for comparison against
 `data/data_hopcopter/landing_points_*.csv`.
 
+### Running with the LiDAR map (`hopcopter_perception`)
+
+The same planner and controller, but on a map the robot builds itself (docs/lidar_mapping_plan.md):
+the simulated Livox Mid-360 and its IMU go through FAST-LIO to `lidar_elevation_mapper`, which
+publishes `/elevation_map`. The scenario's known map goes on `/elevation_map_known`, as the
+ground truth the LiDAR map is scored against. The robot is held at its spawn pose until FAST-LIO
+is up, then dropped as at Play.
+
+**Prerequisites** (once): FAST-LIO and the Livox driver are overlays outside this repo, built in
+`~/ws_livox` (`livox_ros_driver2`, which FAST-LIO needs for its messages) and `~/fastlio_ws`
+(`FAST_LIO_ROS2`, commit `18418bc`). In every terminal, source in this order, then build:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ws_livox/install/setup.bash
+source ~/fastlio_ws/install/setup.bash
+cd ~/CrazySim/ros2_ws && colcon build && source install/setup.bash
+```
+
+**Five terminals** (each sourced as above):
+
+```bash
+# 1. Gazebo: -H holds the robot until the pipeline releases it (add -z 3.4 for lilypads)
+cd ~/CrazySim/crazyflie-firmware
+bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_low_wall -H
+
+# 2. cflib server
+cd ~/CrazySim/ros2_ws && ros2 launch crazyflie launch.py backend:=cflib
+
+# 3. The LiDAR pipeline: bridges, adapter, FAST-LIO, anchor, mapper, known map (replaces Terminals 3-5)
+ros2 launch hopcopter_perception lidar_mapping.launch.py scenario:=low_wall
+
+# 4. Planner
+ros2 run ballistic_motion_planner ballistic_planner_node
+
+# 5. hopcopter
+ros2 run hopping_robot hopcopter
+```
+
+Then:
+1. Press **Play**.
+2. The robot hangs for ~1.5 s while FAST-LIO initializes. `lio_anchor` prints
+   `Released the robot`, and the robot drops.
+3. It makes its warm-up hops while the map fills in.
+4. Send the goal as usual.
+
+A goal the LiDAR has not seen yet gets a **frontier plan** (the reachable measured cell nearest
+it). The planner **replans** when the map invalidates the rest of the plan, when it can do better,
+or when the robot holds. For a replan it publishes a DELETE, the robot hops in place, and it plans
+from there. Each replan is logged with its reason to `data/data_ballistic_planner/replans_*.csv`.
+For goals on platforms above the sensor (slope_30deg, cliff_gap), do a look-out hop first:
+`ros2 param set /hopcopter desired_rel_z 1.4`, then back to `0.8`, then send the goal.
+
+Launch arguments:
+- `scenario:=<world>`: the known map; the planner's map takes its extent.
+- `pose_source:=lio` (default) or `gazebo`: the mapper on FAST-LIO, or on Gazebo's pose (a mocap
+  lab; no FAST-LIO, released after 1 s).
+- `mapping:=false`: no LiDAR map; the known map on `/elevation_map`, i.e. the known-map mode with
+  one launch file in place of Terminals 3–5.
+- `imu_acc_limit_g:=32 imu_gyro_limit_dps:=2000`: clip the LiDAR IMU at the real sensor's range.
+- `bridge:=false`: replay a bag of `/clock /cf_0/lidar/points /cf_0/lidar_imu /cf_0/odom`
+  instead of running Gazebo.
+
+After a run (system `python3` is enough):
+
+```bash
+ros2 run hopcopter_perception lio_report.py        # FAST-LIO against Gazebo (data/data_lio/)
+ros2 run hopcopter_perception map_report.py        # LiDAR map against the known map
+ros2 run hopcopter_perception plot_elevation_map.py   # newest map snapshot -> PNG
+```
+
+Results on 2026-11-07, all with FAST-LIO, the planner and hopcopter on the LiDAR map:
+
+| World | Goal | Result | FAST-LIO RMSE | Map error median / p95 |
+|---|---|---|---|---|
+| low_wall | (4, 0) and back | both reached in 4 of 4 runs, no hold | 1.8–2.0 cm | 0.5–0.7 / 1.7–1.8 cm |
+| flat | (4, 0), then (1, 1.5) | both reached in 2 of 2 runs | 1.7–2.3 cm | 0.6–0.7 / 1.5–1.6 cm |
+| lilypads | (11.75, 0) | reached via 2 frontier plans | 1.3–2.6 cm | 0.4–0.5 / 1.5 cm |
+| maze | (14, 0) | reached in 1 of 2 runs, via 3 frontier plans; the other landed on the 0.3 m wall and fell | 4.1–6.7 cm (drift along the corridor) | 0.5–0.7 / 1.7–2.6 cm |
+| slope_30deg | (4.25, −2) | reached via 3 frontier plans (look-out hop) | 1.7–2.5 cm | 0.4–0.6 / 1.3–1.7 cm |
+| cliff_gap | (9.5, 0.5) | reached in 1 of 2 runs (look-out hop; the other fell from the far platform's rim) | 2.0–2.5 cm | 0.5–0.6 / 1.6–1.8 cm |
+| stairs | (4, −2) | not reached: no 0.3 m tread is landable on the LiDAR map (the robot waits beside the stairs) | 3.1 cm | — |
+
+Runs counted from the final planner settings (`standable.lidar_edge_margin` 0.1). The two falls
+(the maze's wall, cliff_gap's rim) are landings left 0.05–0.15 m from a real edge. A margin of 0.2
+prevents them but leaves lilypads' smallest pads only their centre cell, and its partial-map plan
+then fails. docs/lidar_mapping_plan.md ("Status") has the trade-off.
+
+### Offline Mapper Check
+
+Flies a simulated Mid-360 along each world's known-map plan, builds the map, and scores it
+against the known map: height error away from edges (median ≤ 2 cm, 95th percentile ≤ 5 cm), no
+false obstacles away from edges, and no upper bound under the terrain that a neighbour does not
+cover. About a minute; exits 1 on a failure. `--pose-noise <deg>` adds a LIO-like attitude error.
+
+```bash
+ros2 run hopcopter_perception mapper_check
+```
+
 ### Offline Parity Check
 
 Verifies the C++ port against the Python reference planner (no ROS graph
@@ -321,8 +421,10 @@ should match.
 
 Plans 15 cases with the node's defaults and checks every landing's tilt, the
 plans `docs/follow_planner_plan.md` expects, and that the controller could fly
-each hop with real speeds (leg angle and push capacity, η 0.71–0.85). About two
-minutes; exits 1 on a failure:
+each hop with real speeds (leg angle and push capacity, η 0.71–0.85). Then five
+partial LiDAR maps: unseen shadows and pits (no landing there), a wall widened
+by the mapper (no landing on it), an unmeasured start (refused), and a frontier
+plan. About two minutes; exits 1 on a failure:
 
 ```bash
 ros2 run ballistic_motion_planner ballistic_plan_check

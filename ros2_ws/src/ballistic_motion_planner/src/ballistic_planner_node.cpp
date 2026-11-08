@@ -11,10 +11,23 @@
 //                point z = target apex of the hop landing there, i.e. apex height
 //                above that hop's takeoff ground; output.hover_offset for the start)
 //              /trajectory_start_position  (geometry_msgs/PoseStamped)
-// Plans exactly once per /goal_pose message; there is no replan timer.
+// Subscribes too: /hopcopter/apex_decision (hopcopter_msgs/ApexDecision: which
+//              waypoint the robot aims at, and when it hops in place).
+// On a LiDAR map (/elevation_map with an upper_bound layer, from
+// hopcopter_perception) unseen cells carry their bound: the arcs may fly over
+// them above it, but no hop lands on them, and the planner refuses to plan from
+// an unseen start. A goal the LiDAR has not seen yet gets a frontier plan to the
+// reachable cell nearest it. On every map update the remaining hops of the plan
+// are re-checked (landing still standable, its ground moved < 5 cm, every arc
+// still clears with its planned takeoff); when one fails, or a frontier plan can
+// now do better, or the robot gave up on the path (hold), the planner publishes
+// a DELETE alone, waits for the robot to hop in place, and plans again from
+// there, at most once per replan.min_interval. On a hand-made map (no
+// upper_bound layer) nothing changes: it plans once per /goal_pose.
 // CSVs (path + per-hop energy chain) go to data/data_ballistic_planner/.
 // A JSON snapshot (map layers + path + hop radii) goes to vis_planned_path/,
 // and scripts/visualize_planned_path.py renders it to a PNG in the background.
+// Replans are logged, with their reason, to replans_<stamp>.csv there.
 
 #include <ament_index_cpp/get_package_prefix.hpp>
 #include <chrono>
@@ -24,6 +37,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -37,8 +51,10 @@
 #include <grid_map_ros/GridMapRosConverter.hpp>
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <hopcopter_msgs/msg/hop_plan.hpp>
+#include <hopcopter_msgs/msg/apex_decision.hpp>
 
 #include "ballistic_motion_planner/ballistic_physics.hpp"
+#include "ballistic_motion_planner/frontier.hpp"
 #include "ballistic_motion_planner/hopping_astar.hpp"
 #include "ballistic_motion_planner/map2d5.hpp"
 
@@ -94,6 +110,8 @@ public:
     p_.side_clearance = declare_parameter("robot.side_clearance", d.side_clearance);
     p_.steep_grade = declare_parameter("clearance.steep_grade", d.steep_grade);
     p_.arc_max_step = declare_parameter("clearance.arc_max_step", d.arc_max_step);
+    p_.clearance_active_tol = declare_parameter("clearance.active_tolerance", d.clearance_active_tol);
+    p_.clearance_start_exempt = declare_parameter("clearance.start_exempt", d.clearance_start_exempt);
     // momentum_aware only: the stance model (hopcopter.py's k2), the landing tilt
     // cap, the leg-angle floor and the push stage 2 measured
     p_.k2 = declare_parameter("stance.k2", d.k2);
@@ -107,6 +125,30 @@ public:
     hover_offset_ = declare_parameter("output.hover_offset", 0.8);
     // Render each plan's snapshot to a PNG (vis_planned_path/) in the background.
     render_png_ = declare_parameter("output.render_png", true);
+    // LiDAR maps: frontier plans and hold-and-replan (no effect on a hand-made map)
+    frontier_.hop_radius = declare_parameter("frontier.hop_radius", frontier_.hop_radius);
+    frontier_.max_rise = declare_parameter("frontier.max_rise", frontier_.max_rise);
+    frontier_attempts_ = static_cast<int>(declare_parameter("frontier.max_attempts", int64_t{2}));
+    // LiDAR maps put edges up to a cell outward: land at least this much further from them.
+    // 0.1 leaves 0.05-0.15 m to the real edge: plans then landed on the maze's 0.3 m wall and
+    // 0.15 m from cliff_gap's 1.8 m rim, and the robot fell at both (2026-11-07). 0.2 prevents
+    // that, but leaves lilypads' smallest pads only their centre cell, and the pit-unseen plan
+    // fails. Open: see docs/lidar_mapping_plan.md, Status.
+    lidar_edge_margin_ = declare_parameter("standable.lidar_edge_margin", 0.1);
+    // and this far from unseen cells, which can hide a drop: the body radius plus a typical
+    // landing miss (a landing 0.15 m short on a wall's top, next to its unseen shadow, went
+    // over the wall's front edge, 2026-11-07)
+    unseen_margin_ = declare_parameter("standable.unseen_margin", 0.3);
+    // and count a step as an edge 8 cm sooner (0.093 m per cell, ~43 deg): a LiDAR map spreads a
+    // step over two cells (the stairs' 0.18 m risers read 0.09 + 0.09, a gentle slope), so a
+    // plan landed 5 cm past one and the robot fell off it (2026-11-07). 30 deg slopes (0.058 per
+    // cell) and the slanted pads stay landable.
+    lidar_steep_noise_ = declare_parameter("standable.lidar_steep_noise", 0.08);
+    replan_enabled_ = declare_parameter("replan.enabled", true);
+    replan_interval_ = declare_parameter("replan.min_interval", 5.0);       // [s]
+    replan_height_tol_ = declare_parameter("replan.height_tolerance", 0.05);  // [m]
+    replan_hold_wait_ = declare_parameter("replan.hold_wait", 1.0);         // [s] after the DELETE
+    replan_hold_timeout_ = declare_parameter("replan.hold_timeout", 4.0);   // [s]
     const auto map_topic = declare_parameter("topics.map", std::string("/elevation_map"));
     const auto traj_topic = declare_parameter("topics.trajectory", std::string("/ballistic_trajectory"));
     const auto plan_topic = declare_parameter("topics.hop_plan", std::string("/ballistic_hop_plan"));
@@ -123,6 +165,7 @@ public:
       map_topic, rclcpp::QoS(1).transient_local(),
       [this](const grid_map_msgs::msg::GridMap::SharedPtr msg) {
         latest_map_msg_ = msg;
+        map_changed_ = true;
       });
     pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       "/cf_1/pose", rclcpp::SensorDataQoS(),
@@ -136,6 +179,14 @@ public:
       [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
         goalCallback(*msg);
       });
+    decision_sub_ = create_subscription<hopcopter_msgs::msg::ApexDecision>(
+      "/hopcopter/apex_decision", 20,
+      [this](const hopcopter_msgs::msg::ApexDecision::SharedPtr msg) {
+        decision_ = *msg;
+        decision_time_ = std::chrono::steady_clock::now();
+        have_decision_ = true;
+      });
+    replan_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this]() {replanStep();});
 
     csv_dir_ = "/home/zweminhtetaung/CrazySim/data/data_ballistic_planner";
     std::error_code ec;
@@ -168,81 +219,323 @@ public:
 private:
   void goalCallback(const geometry_msgs::msg::PoseStamped & msg)
   {
-    try {
-      if (!latest_map_msg_) {
-        RCLCPP_WARN(get_logger(), "Goal received but no elevation map yet — ignoring. "
-          "Re-publish the goal once the map is up.");
-        return;
-      }
-      if (!have_pose_) {
-        RCLCPP_WARN(get_logger(), "Goal received but no /cf_1/pose yet — ignoring. "
-          "Re-publish the goal once the pose is up.");
-        return;
-      }
+    if (!latest_map_msg_) {
+      RCLCPP_WARN(get_logger(), "Goal received but no elevation map yet — ignoring. "
+        "Re-publish the goal once the map is up.");
+      return;
+    }
+    if (!have_pose_) {
+      RCLCPP_WARN(get_logger(), "Goal received but no /cf_1/pose yet — ignoring. "
+        "Re-publish the goal once the pose is up.");
+      return;
+    }
+    goal_x_ = msg.pose.position.x;
+    goal_y_ = msg.pose.position.y;
+    have_goal_ = true;
+    goal_reached_ = false;
+    failed_plans_ = 0;
+    replan_state_ = ReplanState::kIdle;
+    planAndPublish(robot_x_, robot_y_, "goal");
+  }
 
+  // Plan from (sx, sy) to the goal and publish it. On a LiDAR map whose goal is
+  // not standable yet, plan to the reachable cell nearest it instead (a frontier
+  // plan). Returns whether a plan went out.
+  bool planAndPublish(double sx, double sy, const std::string & why)
+  {
+    last_plan_time_ = std::chrono::steady_clock::now();
+    try {
       const auto t0 = std::chrono::steady_clock::now();
       const auto map = convertMap(*latest_map_msg_);
-
-      const double gx = msg.pose.position.x;
-      const double gy = msg.pose.position.y;
-      if (!map->is_within_bounds(robot_x_, robot_y_)) {
+      const double gx = goal_x_, gy = goal_y_;
+      if (!map->is_within_bounds(sx, sy)) {
         RCLCPP_ERROR(get_logger(),
           "Robot position (%.2f, %.2f) is outside the map "
           "[%.2f, %.2f] x [%.2f, %.2f] — refusing to plan.",
-          robot_x_, robot_y_, map->origin_x(), map->origin_x() + map->size_x(),
+          sx, sy, map->origin_x(), map->origin_x() + map->size_x(),
           map->origin_y(), map->origin_y() + map->size_y());
-        return;
+        return false;
       }
       if (!map->is_within_bounds(gx, gy)) {
+        RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is outside the map — refusing to plan.", gx, gy);
+        return false;
+      }
+      // Start guard: an unseen start would carry its upper bound (or OBSTACLE)
+      // as its height, and every hop would be planned from it.
+      if (!ballistic::start_measured(*map, sx, sy)) {
         RCLCPP_ERROR(get_logger(),
-          "Goal (%.2f, %.2f) is outside the map — refusing to plan.", gx, gy);
-        return;
+          "The start cell (%.2f, %.2f) has no measured height yet — refusing to plan. "
+          "(The mapper writes the start disk at the first touchdown.)", sx, sy);
+        return false;
+      }
+      const auto standable = map->standable_mask(p_.robot_radius, p_.side_clearance, p_.steep_grade);
+      const auto [rg, cg] = map->world_to_grid(gx, gy);
+      const bool goal_standable = standable[static_cast<size_t>(rg) * map->cols() + cg];
+      const bool lidar_map = !map->landable_mask().empty();
+
+      std::vector<std::pair<double, double>> targets;
+      if (goal_standable || !lidar_map) {
+        targets.emplace_back(gx, gy);
+      }
+      if (lidar_map) {
+        // Frontier candidates, nearest the goal first, kept apart by 0.5 m so a
+        // failed search is not repeated next door.
+        for (const auto & [r, c] : ballistic::frontier_candidates(
+            *map, standable, {sx, sy}, {gx, gy}, frontier_))
+        {
+          if (static_cast<int>(targets.size()) >= (goal_standable ? 1 : 0) + frontier_attempts_) {
+            break;
+          }
+          const auto xy = map->grid_to_world(r, c);
+          bool apart = true;
+          for (const auto & t : targets) {
+            apart = apart && std::hypot(t.first - xy.first, t.second - xy.second) >= 0.5;
+          }
+          if (apart && !(r == rg && c == cg)) {
+            targets.push_back(xy);
+          }
+        }
+      }
+      if (targets.empty()) {
+        RCLCPP_ERROR(get_logger(),
+          "(%s) The goal (%.2f, %.2f) is not on measured, standable ground, and no measured cell "
+          "the robot can reach is nearer it: waiting for the map.", why.c_str(), gx, gy);
+        return false;
       }
 
-      ballistic::HoppingAStarPlanner planner(*map, {robot_x_, robot_y_}, {gx, gy}, p_);
       const auto t1 = std::chrono::steady_clock::now();
-      auto path = planner.plan();
-      const auto t2 = std::chrono::steady_clock::now();
+      for (size_t k = 0; k < targets.size(); ++k) {
+        const auto [tx, ty] = targets[k];
+        const bool frontier = !(tx == gx && ty == gy);
+        ballistic::HoppingAStarPlanner planner(*map, {sx, sy}, {tx, ty}, p_);
+        const auto ts = std::chrono::steady_clock::now();
+        auto path = planner.plan();
+        const auto te = std::chrono::steady_clock::now();
+        const double prep_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        const double plan_ms = std::chrono::duration<double, std::milli>(te - ts).count();
+        if (!path) {
+          RCLCPP_ERROR(get_logger(),
+            "(%s) No path found from (%.2f, %.2f) to %s (%.2f, %.2f)%s "
+            "[prep %.1f ms, search %.1f ms, %ld expansions].",
+            why.c_str(), sx, sy, frontier ? "the frontier cell" : "the goal", tx, ty,
+            planner.recheck_failed() ?
+            ": the search's path exceeds the landing tilt cap with its exact arrival directions" : "",
+            prep_ms, plan_ms, planner.n_expansions());
+          continue;
+        }
+        RCLCPP_INFO(get_logger(),
+          "[TIMING] (%s) %s with %zu waypoints: map+fields %.1f ms, A* %.1f ms "
+          "(%ld expansions, %ld edge checks, %ld accepted; %ld hops over the tilt cap, "
+          "%ld over one push)", why.c_str(), frontier ? "Frontier path" : "Path", path->size(),
+          prep_ms, plan_ms, planner.n_expansions(), planner.n_edge_checks(),
+          planner.n_edges_accepted(), planner.n_tilt_rejects(), planner.n_push_rejects());
+        if (frontier) {
+          RCLCPP_WARN(get_logger(),
+            "Goal (%.2f, %.2f) not on measured ground yet: frontier plan to (%.2f, %.2f), %.2f m "
+            "from it; replanning when the goal is measured or the robot gets there.",
+            gx, gy, tx, ty, std::hypot(tx - gx, ty - gy));
+        }
+        logHopTable(planner);
 
-      const double prep_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-      const double plan_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
-
-      if (!path) {
-        RCLCPP_ERROR(get_logger(),
-          "No path found from (%.2f, %.2f) to (%.2f, %.2f)%s "
-          "[prep %.1f ms, search %.1f ms, %ld expansions].",
-          robot_x_, robot_y_, gx, gy,
-          planner.recheck_failed() ?
-          ": the search's path exceeds the landing tilt cap with its exact arrival directions" : "",
-          prep_ms, plan_ms, planner.n_expansions());
-        return;
+        // HopPlan first, then the marker pair, all with one stamp.
+        const auto now_stamp = now();
+        publishHopPlan(*map, *path, planner, now_stamp);
+        publishTrajectory(*path, planner.path_hops(), now_stamp);
+        publishStartPosition(*map, sx, sy);
+        const auto stamp = makeStamp();
+        writeCsvs(*map, *path, planner.path_hops(), planner.path_stances(), stamp);
+        const auto snapshot = writeVisSnapshot(
+          *map, *path, planner.path_hops(), planner.path_stances(), planner.v_g_initial(),
+          sx, sy, tx, ty, stamp, frontier);
+        if (render_png_ && !snapshot.empty()) {
+          renderSnapshot(snapshot);
+        }
+        // What the replan check compares against.
+        active_ = ActivePlan{};
+        active_.valid = path->size() >= 2;
+        active_.frontier = frontier;
+        active_.stamp = now_stamp.seconds();
+        active_.path = *path;
+        active_.hops = planner.path_hops();
+        for (const auto & [x, y] : *path) {
+          const auto [r, c] = map->world_to_grid(x, y);
+          active_.ground.push_back(map->at(r, c));
+        }
+        logReplan(why, frontier ? "frontier plan" : "plan", sx, sy, tx, ty, path->size());
+        failed_plans_ = 0;
+        return true;
       }
-
-      RCLCPP_INFO(get_logger(),
-        "[TIMING] Path with %zu waypoints: map+fields %.1f ms, A* %.1f ms "
-        "(%ld expansions, %ld edge checks, %ld accepted; %ld hops over the tilt cap, "
-        "%ld over one push)",
-        path->size(), prep_ms, plan_ms, planner.n_expansions(),
-        planner.n_edge_checks(), planner.n_edges_accepted(),
-        planner.n_tilt_rejects(), planner.n_push_rejects());
-      logHopTable(planner);
-
-      // HopPlan first, then the marker pair, all with one stamp.
-      const auto now_stamp = now();
-      publishHopPlan(*map, *path, planner, now_stamp);
-      publishTrajectory(*path, planner.path_hops(), now_stamp);
-      publishStartPosition(*map);
-      const auto stamp = makeStamp();
-      writeCsvs(*map, *path, planner.path_hops(), planner.path_stances(), stamp);
-      const auto snapshot = writeVisSnapshot(
-        *map, *path, planner.path_hops(), planner.path_stances(), planner.v_g_initial(),
-        gx, gy, stamp);
-      if (render_png_ && !snapshot.empty()) {
-        renderSnapshot(snapshot);
-      }
+      logReplan(why, "no path", sx, sy, gx, gy, 0);
+      ++failed_plans_;
+      return false;
     } catch (const std::exception & e) {
-      RCLCPP_ERROR(get_logger(), "Error in goalCallback: %s", e.what());
+      RCLCPP_ERROR(get_logger(), "Error in planAndPublish: %s", e.what());
+      return false;
     }
+  }
+
+  // The remaining hops of the active plan against the latest map. "" if they
+  // still hold, else why not.
+  std::string recheckPlan(const ballistic::Map2D5 & map, int first) const
+  {
+    const auto standable = map.standable_mask(p_.robot_radius, p_.side_clearance, p_.steep_grade);
+    const auto inflated = map.inflated_field(p_.robot_radius + p_.side_clearance, p_.steep_grade);
+    const auto & path = active_.path;
+    char buf[200];
+    for (size_t j = std::max(1, first); j < path.size(); ++j) {
+      const auto [xs, ys] = path[j - 1];
+      const auto [xg, yg] = path[j];
+      const auto [rg, cg] = map.world_to_grid(xg, yg);
+      const auto [rs, cs] = map.world_to_grid(xs, ys);
+      if (!standable[static_cast<size_t>(rg) * map.cols() + cg]) {
+        std::snprintf(buf, sizeof(buf), "waypoint %zu (%.2f, %.2f) is no longer standable", j, xg, yg);
+        return buf;
+      }
+      const double tg = map.at(rg, cg), ts = map.at(rs, cs);
+      if (std::abs(tg - active_.ground[j]) > replan_height_tol_) {
+        std::snprintf(buf, sizeof(buf), "waypoint %zu's ground moved %+.3f m", j, tg - active_.ground[j]);
+        return buf;
+      }
+      if (j >= 2 && std::abs(ts - active_.ground[j - 1]) > replan_height_tol_) {
+        std::snprintf(buf, sizeof(buf), "waypoint %zu's ground moved %+.3f m", j - 1,
+          ts - active_.ground[j - 1]);
+        return buf;
+      }
+      // The planned arc against the new terrain: a hop planned at its clearance
+      // floor fails by a hair on any change, so only a real deficit counts
+      // (hopcopter's own re-check raises the apex for the small ones).
+      const double exempt = inflated[static_cast<size_t>(rs) * map.cols() + cs] > ts + 1e-9 ?
+        p_.clearance_start_exempt : 0.0;
+      const auto sampled = ballistic::arc_samples(
+        xs, ys, ts, xg, yg, tg, map, inflated, p_.arc_max_step, p_.clearance_active_tol, exempt);
+      if (!sampled) {
+        std::snprintf(buf, sizeof(buf), "the arc into waypoint %zu leaves the map", j);
+        return buf;
+      }
+      const double tan_a = std::tan(active_.hops[j - 1].alpha_s);
+      const double X = sampled->X;
+      const double k = (X * tan_a - (tg - ts)) / (X * X);
+      double worst = std::numeric_limits<double>::infinity();
+      for (size_t i = 0; i < sampled->u.size(); ++i) {
+        if (sampled->active[i]) {
+          const double u = sampled->u[i];
+          worst = std::min(worst, ts + u * tan_a - k * u * u - sampled->field[i]);
+        }
+      }
+      if (worst < p_.bottom_clearance - replan_height_tol_) {
+        std::snprintf(buf, sizeof(buf),
+          "the arc into waypoint %zu clears the terrain by %.2f m now (needs %.2f)",
+          j, worst, p_.bottom_clearance);
+        return buf;
+      }
+    }
+    return "";
+  }
+
+  // Hold-and-replan (LiDAR maps). Runs at 10 Hz on the wall clock.
+  void replanStep()
+  {
+    if (!replan_enabled_ || !have_goal_ || goal_reached_ || !latest_map_msg_) {
+      return;
+    }
+    const auto now_t = std::chrono::steady_clock::now();
+    const double since_plan = std::chrono::duration<double>(now_t - last_plan_time_).count();
+    if (replan_state_ == ReplanState::kWaitHold) {
+      const double since_delete = std::chrono::duration<double>(now_t - delete_time_).count();
+      const bool holding = have_decision_ && decision_time_ > delete_time_ &&
+        (decision_.mode == "idle" || decision_.mode == "hold");
+      if ((holding && since_delete >= replan_hold_wait_) || since_delete >= replan_hold_timeout_) {
+        replan_state_ = ReplanState::kIdle;
+        double sx = robot_x_, sy = robot_y_;
+        if (holding) {
+          sx = decision_.aim.x;
+          sy = decision_.aim.y;
+        } else {
+          RCLCPP_WARN(get_logger(), "No in-place hop reported %.1f s after the DELETE: replanning "
+            "from /cf_1/pose", since_delete);
+        }
+        if (!planAndPublish(sx, sy, "replan: " + replan_reason_) && failed_plans_ == 0) {
+          ++failed_plans_;  // refused before searching (off the map, unseen start, ...)
+        }
+      }
+      return;
+    }
+    if (!map_changed_ && active_.valid) {
+      return;
+    }
+    // Only a LiDAR map grows; a hand-made map's plan is final.
+    if (std::find(latest_map_msg_->layers.begin(), latest_map_msg_->layers.end(), "upper_bound") ==
+      latest_map_msg_->layers.end())
+    {
+      map_changed_ = false;
+      return;
+    }
+    std::string reason;
+    if (active_.valid && have_decision_ && std::abs(decision_.path_id - active_.stamp) < 1e-4) {
+      const auto map = convertMap(*latest_map_msg_);
+      if (decision_.mode == "goal") {
+        if (active_.frontier) {
+          reason = "reached the frontier";
+        } else {
+          goal_reached_ = true;
+          RCLCPP_INFO(get_logger(), "Goal (%.2f, %.2f) reached", goal_x_, goal_y_);
+          return;
+        }
+      } else if (decision_.mode == "hold") {
+        reason = "the robot gave up on the path (hold)";
+      } else if (decision_.mode == "track" || decision_.mode == "retry") {
+        reason = recheckPlan(*map, decision_.land_index);
+      }
+      if (reason.empty() && active_.frontier) {
+        const auto standable = map->standable_mask(p_.robot_radius, p_.side_clearance, p_.steep_grade);
+        const auto [rg, cg] = map->world_to_grid(goal_x_, goal_y_);
+        if (standable[static_cast<size_t>(rg) * map->cols() + cg]) {
+          reason = "the goal is measured now";
+        }
+      }
+    } else if (!active_.valid) {
+      reason = "no plan yet";  // the last attempt failed: try again on the newer map
+    }
+    map_changed_ = false;
+    // After failed attempts, wait longer each time (up to 6x), so a robot off the
+    // map or a goal nothing reaches does not replan every few seconds.
+    const double interval = replan_interval_ * std::min(6, 1 << std::min(failed_plans_, 3));
+    if (reason.empty() || since_plan < interval) {
+      if (!reason.empty() && reason != pending_reason_) {
+        RCLCPP_INFO(get_logger(), "Replan pending (%s), %.1f s after the last plan",
+          reason.c_str(), since_plan);
+        pending_reason_ = reason;
+      }
+      return;
+    }
+    pending_reason_.clear();
+    replan_reason_ = reason;
+    // DELETE alone: hopcopter drops the path 0.5 s later and hops in place.
+    visualization_msgs::msg::Marker del;
+    del.header.frame_id = "world";
+    del.header.stamp = now();
+    del.id = kPathMarkerId;
+    del.action = visualization_msgs::msg::Marker::DELETE;
+    traj_pub_->publish(del);
+    active_.valid = false;
+    delete_time_ = now_t;
+    replan_state_ = ReplanState::kWaitHold;
+    RCLCPP_WARN(get_logger(), "Replanning (%s): path deleted, waiting for the robot to hop in place",
+      reason.c_str());
+  }
+
+  void logReplan(const std::string & why, const std::string & outcome, double sx, double sy,
+    double tx, double ty, size_t n)
+  {
+    if (!replan_csv_.is_open()) {
+      replan_csv_.open(vis_dir_ + "/../replans_" + makeStamp() + ".csv");
+      replan_csv_ << "wall_time,reason,outcome,start_x,start_y,target_x,target_y,goal_x,goal_y,waypoints\n";
+    }
+    replan_csv_ << std::fixed << std::setprecision(3)
+                << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
+                << ",\"" << why << "\"," << outcome << "," << sx << "," << sy << "," << tx << ","
+                << ty << "," << goal_x_ << "," << goal_y_ << "," << n << "\n";
+    replan_csv_.flush();
   }
 
   // GridMap -> Map2D5. Iterate OUR indices and query grid_map by position:
@@ -260,16 +553,34 @@ private:
     const double origin_y = gm.getPosition().y() - size_y / 2.0;
 
     auto map = std::make_unique<ballistic::Map2D5>(size_x, size_y, res, origin_x, origin_y);
-    const auto & layer = gm.get("elevation");
-    (void)layer;
+    // The map contract (docs/lidar_mapping_plan.md): a measured cell is its
+    // height; an unseen cell with an upper bound is terrain at the bound for the
+    // clearance test, never a landing; anything else (unseen and unbounded, or a
+    // hand-made map's NaN) is OBSTACLE, an infinitely tall column. A map without
+    // an upper_bound layer is hand-made: every finite cell is landable.
+    const bool lidar = gm.exists("upper_bound");
+    std::vector<uint8_t> landable;
+    if (lidar) {
+      landable.assign(static_cast<size_t>(map->rows()) * map->cols(), 0);
+    }
     for (int r = 0; r < map->rows(); ++r) {
       for (int c = 0; c < map->cols(); ++c) {
         const auto [x, y] = map->grid_to_world(r, c);
-        const float v = gm.atPosition("elevation", grid_map::Position(x, y));
-        // NaN on the wire = OBSTACLE (infinitely tall column / unknown cell).
-        map->at(r, c) = std::isnan(v) ? ballistic::Map2D5::OBSTACLE
-                                      : static_cast<double>(v);
+        const grid_map::Position pos(x, y);
+        const float v = gm.atPosition("elevation", pos);
+        if (!std::isnan(v)) {
+          map->at(r, c) = static_cast<double>(v);
+          if (lidar) {
+            landable[static_cast<size_t>(r) * map->cols() + c] = 1;
+          }
+          continue;
+        }
+        const float b = lidar ? gm.atPosition("upper_bound", pos) : NAN;
+        map->at(r, c) = std::isnan(b) ? ballistic::Map2D5::OBSTACLE : static_cast<double>(b);
       }
+    }
+    if (lidar) {
+      map->set_landable(std::move(landable), lidar_edge_margin_, unseen_margin_, lidar_steep_noise_);
     }
     return map;
   }
@@ -402,14 +713,14 @@ private:
       kPathMarkerId, m.points.size());
   }
 
-  void publishStartPosition(const ballistic::Map2D5 & map)
+  void publishStartPosition(const ballistic::Map2D5 & map, double sx, double sy)
   {
     geometry_msgs::msg::PoseStamped ps;
     ps.header.frame_id = "world";
     ps.header.stamp = now();
-    ps.pose.position.x = robot_x_;
-    ps.pose.position.y = robot_y_;
-    const auto [r, c] = map.world_to_grid(robot_x_, robot_y_);
+    ps.pose.position.x = sx;
+    ps.pose.position.y = sy;
+    const auto [r, c] = map.world_to_grid(sx, sy);
     ps.pose.position.z = map.at(r, c) + hover_offset_;
     ps.pose.orientation.w = 1.0;
     start_pub_->publish(ps);
@@ -454,8 +765,8 @@ private:
     const std::vector<std::pair<double, double>> & path,
     const std::vector<ballistic::Hop> & hops,
     const std::vector<ballistic::Stance> & stances,
-    double v_g_initial, double gx, double gy,
-    const std::string & stamp)
+    double v_g_initial, double sx, double sy, double gx, double gy,
+    const std::string & stamp, bool frontier)
   {
     const std::string file = vis_dir_ + "/snapshot_" + stamp + ".json";
     std::ofstream f(file);
@@ -499,8 +810,10 @@ private:
       << "\"bottom_clearance\": " << p_.bottom_clearance << ",\n"
       << "\"side_clearance\": " << p_.side_clearance << ",\n"
       << "\"steep_grade\": " << p_.steep_grade << ",\n"
-      << "\"start\": [" << robot_x_ << "," << robot_y_ << "],\n"
-      << "\"goal\": [" << gx << "," << gy << "],\n";
+      << "\"start\": [" << sx << "," << sy << "],\n"
+      << "\"goal\": [" << gx << "," << gy << "],\n"
+      << "\"final_goal\": [" << goal_x_ << "," << goal_y_ << "],\n"
+      << "\"frontier\": " << (frontier ? "true" : "false") << ",\n";
     f << "\"path\": [";
     for (size_t i = 0; i < path.size(); ++i) {
       if (i) {f << ",";}
@@ -513,6 +826,11 @@ private:
     jsonArray(f, "steep", steep);
     jsonArray(f, "standable", standable);
     jsonArray(f, "inflated", inflated);
+    if (!map.landable_mask().empty()) {
+      // LiDAR map: 1 = measured; 0 = unseen (its grid value is the upper bound,
+      // or OBSTACLE when unbounded)
+      jsonArray(f, "measured", map.landable_mask());
+    }
     f << "\"leg_length\": " << p_.leg_length << ",\n"
       << "\"arc_max_step\": " << p_.arc_max_step << ",\n"
       << "\"momentum_aware\": " << (p_.momentum_aware ? "true" : "false") << ",\n"
@@ -544,8 +862,10 @@ private:
       const double t_s = map.at(rs, cs);
       const double t_g = map.at(rg, cg);
 
+      const double exempt = inflated[static_cast<size_t>(rs) * map.cols() + cs] > t_s + 1e-9 ?
+        p_.clearance_start_exempt : 0.0;
       const auto sampled = ballistic::arc_samples(
-        x_s, y_s, t_s, x_g, y_g, t_g, map, inflated, p_.arc_max_step);
+        x_s, y_s, t_s, x_g, y_g, t_g, map, inflated, p_.arc_max_step, p_.clearance_active_tol, exempt);
       std::vector<double> u, field, ground;
       std::vector<uint8_t> active;
       double min_c = std::numeric_limits<double>::infinity();
@@ -676,7 +996,33 @@ private:
     }
   }
 
+  enum class ReplanState {kIdle, kWaitHold};
+  struct ActivePlan
+  {
+    bool valid = false;
+    bool frontier = false;
+    double stamp = 0.0;  // the marker's stamp [s]: hopcopter's path_id
+    std::vector<std::pair<double, double>> path;
+    std::vector<ballistic::Hop> hops;
+    std::vector<double> ground;  // the map's height at each waypoint when planned
+  };
+
   ballistic::PlannerParams p_;
+  ballistic::FrontierParams frontier_;
+  int frontier_attempts_ = 2;
+  bool replan_enabled_ = true;
+  double replan_interval_, replan_height_tol_, replan_hold_wait_, replan_hold_timeout_;
+  double goal_x_ = 0.0, goal_y_ = 0.0;
+  bool have_goal_ = false, goal_reached_ = false, map_changed_ = false;
+  int failed_plans_ = 0;
+  double lidar_edge_margin_ = 0.1, unseen_margin_ = 0.3, lidar_steep_noise_ = 0.08;
+  ActivePlan active_;
+  ReplanState replan_state_ = ReplanState::kIdle;
+  std::string replan_reason_, pending_reason_;
+  std::chrono::steady_clock::time_point last_plan_time_, delete_time_, decision_time_;
+  hopcopter_msgs::msg::ApexDecision decision_;
+  bool have_decision_ = false;
+  std::ofstream replan_csv_;
   double hover_offset_;
   bool render_png_;
   std::string csv_dir_;
@@ -693,6 +1039,8 @@ private:
   rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr map_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+  rclcpp::Subscription<hopcopter_msgs::msg::ApexDecision>::SharedPtr decision_sub_;
+  rclcpp::TimerBase::SharedPtr replan_timer_;
 };
 
 int main(int argc, char ** argv)

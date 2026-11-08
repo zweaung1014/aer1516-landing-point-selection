@@ -46,11 +46,14 @@ if __name__ == "__main__":
     env = jinja2.Environment(loader=jinja2.FileSystemLoader(args.env_dir))
     template = env.get_template(os.path.relpath(args.filename, args.env_dir))
 
+    # env: the spawning shell's environment, for sensor settings the template reads with
+    # env.get('NAME', default) (e.g. LIDAR_IMU_RATE, LIDAR_IMU_NOISE in models/crazyflie)
     d = {'np': np, \
          'cf_id': args.cf_id, \
          'cffirm_udp_port': args.cffirm_udp_port, \
          'cflib_udp_port': args.cflib_udp_port, \
-         'cf_name': args.cf_name}
+         'cf_name': args.cf_name, \
+         'env': dict(os.environ)}
 
     # override_params_path = args.override_parameters_json_path
     # if not override_params_path:

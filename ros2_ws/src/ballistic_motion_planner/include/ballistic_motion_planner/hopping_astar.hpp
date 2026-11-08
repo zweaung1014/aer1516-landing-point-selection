@@ -49,6 +49,18 @@ struct PlannerParams
   double side_clearance = 0.5;
   double steep_grade = 1.7320508075688772;  // tan(60 deg)
   double arc_max_step = 0.05;
+  // Terrain constrains an arc only where it is more than this above both
+  // endpoints. The reference planner uses 0, which is right on a hand-made map;
+  // on a LiDAR map flat ground is a few mm rough, and at 0 a bump of 3 mm next to
+  // the takeoff asked the full bottom_clearance there: a vertical launch.
+  double clearance_active_tol = 0.0;
+  // From a takeoff that lies inside the inflation (an obstacle or edge within its
+  // reach), the arc's first clearance_start_exempt metres read the terrain itself
+  // rather than the inflated field (arc_samples): otherwise a robot that landed next
+  // to a pole could never hop away (2026-11-07 maze run: it landed 0.21 m from one
+  // and no hop was feasible). 0 for the reference planner; the robot's is the
+  // inflation's reach. Takeoffs outside the inflation are unaffected.
+  double clearance_start_exempt = 0.0;
   // Energy chain.
   double mass = 0.8;
   double eta = 0.7;
@@ -161,6 +173,8 @@ private:
   uint64_t make_state(int row, int col, int bin) const;
 
   double heuristic(int row, int col) const;
+  // clearance_start_exempt if the takeoff cell lies inside the inflation, else 0
+  double start_exempt(int row, int col, double z) const;
   // Every landing cell the hop lattice reaches from (row, col), in the
   // reference order: the scanline disk, then the goal snap.
   template<typename Visit>

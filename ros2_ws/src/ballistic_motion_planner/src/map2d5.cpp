@@ -102,7 +102,7 @@ std::vector<uint8_t> Map2D5::steep_mask(double min_grade, bool finite_only) cons
       for (int c = 0; c + std::max(o.a_dc, o.b_dc) < cols_; ++c) {
         const size_t ia = static_cast<size_t>(r) * cols_ + (c + o.a_dc);
         const size_t ib = static_cast<size_t>(r + o.b_dr) * cols_ + (c + o.b_dc);
-        bool steep = std::abs(grid_[ib] - grid_[ia]) > min_grade * o.dist;
+        bool steep = std::abs(grid_[ib] - grid_[ia]) > min_grade * o.dist - steep_noise_;
         if (finite_only) {
           if (obs[ia] || obs[ib]) {steep = false;}
         } else {
@@ -163,6 +163,25 @@ std::vector<uint8_t> Map2D5::standable_mask(
   std::vector<uint8_t> out(grid_.size());
   for (size_t i = 0; i < grid_.size(); ++i) {
     out[i] = !obstacle_blocked[i] && !edge_blocked[i];
+  }
+  if (!landable_.empty()) {
+    // A landing needs measured terrain under the whole body: an unseen cell can
+    // hide a drop (a wall's top looks like a platform when the bound behind it
+    // is as high as the wall).
+    std::vector<uint8_t> unseen(grid_.size());
+    for (size_t i = 0; i < grid_.size(); ++i) {unseen[i] = !landable_[i];}
+    const auto near_unseen = dilate_bool(unseen, std::max(radius, unseen_margin_));
+    for (size_t i = 0; i < grid_.size(); ++i) {
+      out[i] = out[i] && !near_unseen[i];
+    }
+    if (edge_margin_ > 0.0) {
+      // + half a cell: dilate_bool is strict (<), and a margin of one cell must
+      // reach the neighbours
+      const auto near_edge = dilate_bool(edge_blocked, edge_margin_ + 0.5 * resolution_);
+      for (size_t i = 0; i < grid_.size(); ++i) {
+        out[i] = out[i] && !near_edge[i];
+      }
+    }
   }
   return out;
 }

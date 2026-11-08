@@ -70,20 +70,27 @@ struct ArcSamples
 // March the hop centreline and read the inflated field along it. Step is
 // clamped to min(max_step, resolution / 3) — the /3 is a hard requirement
 // (the T_req pole at the endpoints; see the Python docstring). nullopt when
-// the centreline leaves the map or the hop is degenerate.
+// the centreline leaves the map or the hop is degenerate. A sample is active
+// (constrains the arc) where the field is more than active_tol above both
+// endpoints; the reference planner uses 0.
+// Within start_exempt of the takeoff (along the centreline) the samples read the
+// terrain itself, not the sideways-inflated field: the robot already stands
+// there, so an obstacle beside it (inside the inflation) must not stop it hopping
+// away, while one under the arc still does. The reference planner uses 0.
 std::optional<ArcSamples> arc_samples(
   double x_s, double y_s, double t_s,
   double x_g, double y_g, double t_g,
-  const Map2D5 & map, const std::vector<double> & inflated, double max_step);
+  const Map2D5 & map, const std::vector<double> & inflated, double max_step,
+  double active_tol = 0.0, double start_exempt = 0.0);
 
 // Shallowest takeoff angle whose arc clears the (inflated) terrain, in closed
 // form. -inf when nothing constrains; nullopt when the centreline leaves the
-// map. Caller clamps into [alpha_min, alpha_max].
+// map. Caller clamps into [alpha_min, alpha_max]. active_tol as in arc_samples.
 std::optional<double> clearance_floor_alpha(
   double x_s, double y_s, double t_s,
   double x_g, double y_g, double t_g,
   const Map2D5 & map, const std::vector<double> & inflated,
-  double gate, double max_step);
+  double gate, double max_step, double active_tol = 0.0, double start_exempt = 0.0);
 
 // ---------------------------------------------------------------------------
 // The hop the robot flies (stage 3 of docs/follow_planner_plan.md). Not in the

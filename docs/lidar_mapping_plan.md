@@ -1,8 +1,73 @@
 # Plan: build the elevation map from the LiDAR
 
-Written 2026-11-06 on branch `lidar-simulation-hopcopter-bmp`. Nothing here is implemented yet.
-This is item 3 of Part 4 in [next_steps_after_stage4.md](next_steps_after_stage4.md). The decisions
-(D1–D8, at the end) are yours to make. Each one has a recommendation, and the stages assume it.
+Written 2026-11-06 on branch `lidar-simulation-hopcopter-bmp`; **implemented 2026-11-07** on
+`lidar-mapping-bmp` (see "Status" below). This is item 3 of Part 4 in
+[next_steps_after_stage4.md](next_steps_after_stage4.md). The decisions (D1–D8, at the end) were
+taken as recommended.
+
+## Status (2026-11-07)
+
+All stages are implemented. Every number below comes from headless runs with FAST-LIO, the
+mapper, the planner and hopcopter together on the LiDAR map. The details, and why each parameter
+has its value, are in CHANGELOG.md's [Unreleased] entry.
+
+| Stage | Result |
+|---|---|
+| 0 | `hopcopter_perception` builds against the overlays; `fastlio_mapping` runs with `config/fast_lio_sim.yaml`. |
+| 1 | Mid-360 upside down (10 Hz, 512 × 40 rays, 19–20 k finite points per scan), its IMU, one bridge (`config/bridge_sim.yaml`), `lidar_sim_adapter`, `/clock`. RTF 0.95–1.00 with everything running. Gazebo's scan stamps match its pose to the millisecond. |
+| 2 | Hold and release works as planned: a hidden static DetachableJoint parent (`sitl_singleagent.sh -H`); no FAST-LIO patch. FAST-LIO, low_wall: RMSE 1.5–2.0 cm, max ≤ 4.1 cm, attitude ≤ 0.35°, no touchdown jumps. Other worlds: RMSE 1.3–3.1 cm; one 0.4 s attitude transient of 2° on lilypads. The same with the IMU clipped at ±32 g or ±16 g, so Point-LIO was not needed. Maze: drifted 9.5 cm along its 14 m corridor (RMSE 6.7 cm). |
+| 3a/3b | `lidar_elevation_mapper`. Offline (`mapper_check`, nine worlds): median ≤ 4 mm, p95 ≤ 13 mm away from edges. Sim on FAST-LIO: median 0.4–0.7 cm, p95 1.5–1.8 cm. Edges stay within one cell. 3b matches 3a to < 1 cm on the low_wall bag. |
+| 4 | The planner and hopcopter read the bound layer: start guard, frontier plans, hold-and-replan. `ballistic_parity_test` is byte-identical; the 15 original `ballistic_plan_check` cases are unchanged and 5 new partial-map cases pass. With the final settings, goals were reached on low_wall (Test 1, there and back; 4 of 4 runs), flat (Test 2; 2 of 2), lilypads and slope_30deg (the latter with the look-out hop). On maze and cliff_gap it was 1 of 2 runs each; the other runs fell, see below. Stairs is not reached. |
+| 5 | `lidar_mapping.launch.py`; README, CLAUDE.md, CHANGELOG. |
+
+What testing changed from the design above:
+- **The LiDAR IMU runs at 1 kHz and is averaged to 200 Hz** in the adapter. Gazebo samples an IMU
+  instantaneously, and at 200 Hz the mast-top IMU aliased a stance's rotation: one stance's
+  velocity came out 6.4 m/s wrong, and FAST-LIO ran 1.2 m away. A real IMU's anti-aliasing filter
+  averages instead.
+- **FAST-LIO gets every 3rd point**, as the shipped Mid-360 config's `point_filter_num` 3 does
+  (this fork's default handler ignores that parameter). Its IMU queue is 10 deep on the
+  scan-processing thread, and 51 ms scans dropped a touchdown's samples.
+- **FAST-LIO's voxels are 0.1 m and `acc_cov` 3.0.** At 0.2 m the height drifted 4 cm; at 0.1 the
+  horizontal speed lagged after fast touchdowns.
+- **The mapper's rules needed hardening against gpu_lidar's mixed pixels** at silhouettes:
+  - rays carve only near cell centres;
+  - the bound is the third-lowest ray;
+  - three rays must pass below a height to remove it, and rays through well-supported heights
+    are dropped;
+  - a height counts after 2 hits and three rays above it;
+  - no variance inflation, and a 1 cm floor on each cell's sigma.
+- **The planner on LiDAR maps:**
+  - terrain constrains an arc only 5 cm above both ends (LiDAR ground is mm-rough);
+  - landings keep 0.3 m from unseen cells and one cell further from steep edges, and steps count
+    as edges 8 cm sooner;
+  - from a takeoff inside the clearance inflation, the first 0.25 m read the terrain itself.
+
+  Without these, the plans landed on a wall's top and on stair risers, and in the maze the robot
+  was trapped beside a pole.
+
+Open:
+- **Stairs (0.3 m treads, 0.18 m risers).** The mapper spreads each riser over two cells, and
+  with the margins above no tread is landable. The robot goes to the side of the staircase and
+  waits; it no longer falls. Options: a mapper that localizes step edges (e.g. the max of the
+  face hits in front of a face), or `standable.lidar_edge_margin:=0` with
+  `standable.lidar_steep_noise` tuned per world.
+- **Landings near edges (a decision for you).** With `standable.lidar_edge_margin` 0.1, a
+  landing can sit 0.05–0.15 m from a real edge, and two runs fell:
+  - maze: the plan landed on the 0.3 m-wide wall (the known map leaves its middle cell
+    standable too);
+  - cliff_gap: the plan landed 0.15 m from the far platform's 1.8 m face (as the known-map plan
+    does). A replan fired mid-flight, and the robot came down on the rim and fell back into the gap.
+
+  A margin of 0.2 prevents both, but leaves lilypads' smallest pads (r 0.35 m) only their centre
+  cell, and the pit-unseen `ballistic_plan_check` case then has no path. Better fixes:
+  - a margin that grows with the drop (or a "no drop within 0.25 m" footprint test);
+  - not replanning during a hop onto a platform;
+  - a mapper that localizes faces instead of spreading them a cell outward.
+- **Maze odometry drift** (9.5 cm over 14 m). Mapping and flying still worked.
+- **Replanning on the move**, the look-out hop by hand, and the controller on LIO remain "Later".
+- **Not done: anchoring without mocap** (camera_init levelled by gravity, the start ground at 0).
+  The sim anchors on Gazebo's pose.
 
 ## Goal
 
@@ -379,6 +444,8 @@ Update the README, CLAUDE.md (architecture, map contract, the sim-time nodes, ho
 and the CHANGELOG.
 
 ## Decisions
+
+All eight were taken as recommended (2026-11-07).
 
 | | Decision | Recommendation |
 |---|---|---|

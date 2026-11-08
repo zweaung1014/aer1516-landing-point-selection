@@ -1,0 +1,38 @@
+# ros_gz_bridge for the LiDAR pipeline (hopcopter_perception/launch/lidar_mapping.launch.py).
+# One process for everything the sim exchanges with ROS; it replaces the README's
+# Terminals 3 and 4 (the /cf_0/imu and /cf_0/odom bridges).
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+# The base_link IMU (1 kHz) and Gazebo's model odometry (200 Hz): hopcopter's state
+- ros_topic_name: "/cf_0/imu"
+  gz_topic_name: "/cf_0/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+- ros_topic_name: "/cf_0/odom"
+  gz_topic_name: "/cf_0/odom"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+# The Mid-360 and its IMU (model.sdf.jinja), for lidar_sim_adapter
+- ros_topic_name: "/cf_0/lidar/points"
+  gz_topic_name: "/cf_0/lidar/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+- ros_topic_name: "/cf_0/lidar_imu"
+  gz_topic_name: "/cf_0/lidar_imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+  subscriber_queue: 400
+  publisher_queue: 400
+# The release of the hold (lio_anchor -> the holder's DetachableJoint)
+- ros_topic_name: "/cf_0/release"
+  gz_topic_name: "/cf_0/release"
+  ros_type_name: "std_msgs/msg/Empty"
+  gz_type_name: "gz.msgs.Empty"
+  direction: ROS_TO_GZ

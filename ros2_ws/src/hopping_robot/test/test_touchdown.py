@@ -147,3 +147,20 @@ def test_steps_stay_sparse():
         t = closed_form(z0, 0.0, 0.0)
         n = math.ceil(t / min(0.1, 0.05 / max(math.hypot(v[0], v[1]), 1e-9)))
         assert td.steps <= n + 3
+
+
+def test_unseen_ground_falls_through():
+    """On a LiDAR map an unseen cell has no ground: hopcopter passes the floor for it, so a fall
+    past a pad's rim over the hidden pit goes on to the floor instead of stopping in mid-air (or
+    looping) on a NaN."""
+    nan = float('nan')
+    floor = 0.0
+    seen = pads((0.0, 0.0, 0.5, 2.0), floor=nan)               # a 2 m pad; around it, unseen
+
+    def ground(x, y):
+        z = seen(x, y)
+        return floor if math.isnan(z) else z
+    td = march_touchdown((0.3, 0.0, 3.2), (1.5, 0.0, 0.0), UP, LEG, G, ground, floor)
+    assert td.ground == floor and td.foot[0] > 0.5
+    td = march_touchdown((0.0, 0.0, 3.2), (0.3, 0.0, 0.0), UP, LEG, G, ground, floor)
+    assert td.ground == 2.0

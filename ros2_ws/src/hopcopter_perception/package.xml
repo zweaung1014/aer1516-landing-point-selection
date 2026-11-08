@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hopcopter_perception</name>
+  <version>0.1.0</version>
+  <description>Hopcopter's LiDAR pipeline: the Gazebo sensor adapter, FAST-LIO's hold-and-release anchor, and the LiDAR elevation mapper that builds /elevation_map (docs/lidar_mapping_plan.md).</description>
+  <maintainer email="zweminhtetaung@gmail.com">zweminhtetaung</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_eigen</depend>
+  <depend>grid_map_core</depend>
+  <depend>grid_map_ros</depend>
+  <depend>grid_map_msgs</depend>
+  <depend>eigen</depend>
+  <depend>elevation_map_publisher</depend>
+
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <!-- fast_lio comes from the ~/fastlio_ws overlay (D8 of docs/lidar_mapping_plan.md) -->
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

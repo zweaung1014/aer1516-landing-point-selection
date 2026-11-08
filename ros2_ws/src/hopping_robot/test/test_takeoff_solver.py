@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from hopping_robot.JumpLib.takeoff_solver import (LIFT_DT, LIFT_TILT, HopModel, clearance_apex,
-                                                  dilate, tilt_of, unit)
+                                                  composed_terrain, dilate, tilt_of, unit)
 
 M = HopModel()
 UP = np.array([0.0, 0.0, 1.0])
@@ -240,3 +240,62 @@ def test_clearance_apex_over_the_wall():
     # hops that stay off the wall, or in place, are not constrained
     assert clearance_apex(field, origin, res, (0.05, 0.05), (1.65, 0.05), 0.0, 0.0, 0.3) == -math.inf
     assert clearance_apex(field, origin, res, (1.65, 0.05), (1.65, 0.05), 0.0, 0.0, 0.3) == -math.inf
+
+
+def test_composed_terrain_on_a_lidar_map():
+    """docs/lidar_mapping_plan.md's map contract: a LiDAR map's unseen cells are terrain at their
+    upper bound for the clearance re-check, and unseen, unbounded ones are obstacles. The wall's
+    shadow (x 2.7-3.6, seen from the start's apex) bounded by the rays over the wall's top asks
+    no more apex of the wall hop than the measured ground did; unbounded, it blocks the hop."""
+    grid, origin, res = low_wall()
+    xs = origin[0] + (np.arange(grid.shape[0]) + 0.5) * res
+    shadow = (xs >= 2.7) & (xs < 3.6)
+    elevation = grid.copy()
+    elevation[shadow, :] = np.nan
+    bound = np.full(grid.shape, np.nan)
+    bound[shadow, :] = (0.4 * (3.6 - xs[shadow]) / 0.9 + 0.05)[:, None]
+    assert composed_terrain(grid) is grid                     # a hand-made map: unchanged
+    seen = clearance_apex(dilate(grid, res, 0.33), origin, res, (1.65, 0.05), (3.85, 0.05),
+                          0.0, 0.0, 0.3)
+    bounded = clearance_apex(dilate(composed_terrain(elevation, bound), res, 0.33), origin, res,
+                             (1.65, 0.05), (3.85, 0.05), 0.0, 0.0, 0.3)
+    assert bounded == pytest.approx(seen, abs=0.05)
+    unbounded = clearance_apex(dilate(composed_terrain(elevation, np.full(grid.shape, np.nan)), res,
+                                      0.33), origin, res, (1.65, 0.05), (3.85, 0.05), 0.0, 0.0, 0.3)
+    assert unbounded == math.inf
+
+
+def test_clearance_apex_ignores_lidar_roughness():
+    """On a LiDAR map flat ground reads a few mm high or low. With the planner's 0 tolerance a
+    3 mm bump next to the takeoff asked the full 0.2 m clearance there, a near-vertical launch
+    (a 1.95 m apex for a 1.2 m flat hop, 2026-11-07 low_wall run); 5 cm of tolerance ignores it
+    and still sees the wall."""
+    grid, origin, res = low_wall()
+    rough = grid.copy()
+    rough[11, :] += 0.003                       # x 0.6-0.7, just past a takeoff at 0.54
+    field = dilate(rough, res, 0.18)
+    assert clearance_apex(field, origin, res, (0.54, 0.01), (1.75, 0.05), 0.0, 0.0, 0.2) > 0.8
+    assert clearance_apex(field, origin, res, (0.54, 0.01), (1.75, 0.05), 0.0, 0.0, 0.2,
+                          active_tol=0.05) == -math.inf
+    wall = clearance_apex(field, origin, res, (1.65, 0.05), (3.55, 0.05), 0.0, 0.0, 0.3, active_tol=0.05)
+    assert wall == pytest.approx(clearance_apex(dilate(grid, res, 0.18), origin, res, (1.65, 0.05),
+                                                (3.55, 0.05), 0.0, 0.0, 0.3), abs=1e-9)
+
+
+def test_clearance_apex_lets_a_robot_hop_away_from_a_pole():
+    """2026-11-07 maze run: the robot landed 0.21 m from a 3 m pole, inside the inflation, and
+    every hop's first samples read the pole as infinitely tall: no hop could leave. From a takeoff
+    inside the inflation the first metres read the terrain itself: away from the pole is free, over
+    it is still blocked."""
+    res, origin = 0.1, (-0.5, -2.5)
+    grid = np.zeros((50, 50))
+    grid[27:29, 22:24] = np.nan                  # a pole at x 2.2-2.4, y -0.3..-0.1
+    field = dilate(grid, res, 0.18)
+    p = (2.45, 0.05)                             # 0.15 m from its corner
+    away, over = (3.6, 0.05), (2.3, -1.0)
+    exempt = 0.15 + 0.03 + 0.1 * math.sqrt(2.0) / 2.0
+    assert clearance_apex(field, origin, res, p, away, 0.0, 0.0, 0.2) == math.inf
+    assert clearance_apex(field, origin, res, p, away, 0.0, 0.0, 0.2, terrain=grid,
+                          start_exempt=exempt) == -math.inf
+    assert clearance_apex(field, origin, res, p, over, 0.0, 0.0, 0.2, terrain=grid,
+                          start_exempt=exempt) == math.inf

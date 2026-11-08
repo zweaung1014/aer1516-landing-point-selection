@@ -1,0 +1,64 @@
+# FAST-LIO (~/fastlio_ws, FAST_LIO_ROS2 at 18418bc) on the simulated Mid-360
+# (docs/lidar_mapping_plan.md, "FAST-LIO configuration"). use_sim_time comes from
+# the launch file.
+/**:
+    ros__parameters:
+        feature_extract_enable: false
+        point_filter_num: 1         # unused by the default handler: it keeps every point
+        max_iteration: 4
+        # A 20 x 12 m room, not a street (the shipped configs use 0.5). At 0.2 FAST-LIO's
+        # height drifted 4 cm over the first hops and stayed there; 0.1 keeps it under 1 cm
+        # (replays of a low_wall bag, 2026-11-07).
+        filter_size_surf: 0.1
+        filter_size_map: 0.1
+        cube_side_length: 100.0
+        runtime_pos_log_enable: false
+        map_file_path: ""
+
+        common:
+            lid_topic: "/lio/points"   # lidar_sim_adapter: finite points outside the blind radius
+            imu_topic: "/lio/imu"      # the LiDAR's own IMU, 200 Hz
+            time_sync_en: false
+            time_offset_lidar_to_imu: 0.0
+
+        preprocess:
+            # 5: FAST-LIO's default handler (any type but 1-4; 4 is MID360 in this fork).
+            # Gazebo renders each scan at one instant, so every point's time is 0, and
+            # this handler keeps it. The Velodyne and MID360 handlers would invent
+            # per-point times from the azimuth and "undistort" by up to a rotation.
+            lidar_type: 5
+            scan_line: 40
+            blind: 0.3
+            timestamp_unit: 0
+            scan_rate: 10
+
+        mapping:
+            # Process noise, not the sensor's white noise (~1e-4): the touchdown
+            # impacts (30-48 ms, 23-30 g, six 200 Hz samples) dominate how wrong the IMU
+            # propagation is. acc_cov 0.1 (the shipped value) let the horizontal speed
+            # after a fast touchdown lag for ~0.5 s (8-10 cm); 3.0 halves that (replay:
+            # RMSE 4.0 -> 1.5 cm with the finer voxels; 0.01 diverged to 40 cm).
+            acc_cov: 3.0
+            gyr_cov: 0.1
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            fov_degree: 360.0
+            det_range: 30.0
+            extrinsic_est_en: false
+            # The IMU sits at the LiDAR's pose (model.sdf.jinja): identity
+            extrinsic_T: [0.0, 0.0, 0.0]
+            extrinsic_R: [1., 0., 0.,
+                          0., 1., 0.,
+                          0., 0., 1.]
+
+        publish:
+            path_en: true
+            effect_map_en: false
+            map_en: false
+            scan_publish_en: true
+            dense_publish_en: true      # /cloud_registered with every point, for the mapper
+            scan_bodyframe_pub_en: false
+
+        pcd_save:
+            pcd_save_en: false
+            interval: -1

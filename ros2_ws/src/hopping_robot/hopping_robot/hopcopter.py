@@ -21,7 +21,9 @@ from functools import partial
 from sensor_msgs.msg import Imu
 from visualization_msgs.msg import Marker
 from grid_map_msgs.msg import GridMap
-from hopcopter_msgs.msg import HopPlan
+from hopcopter_msgs.msg import HopPlan, ApexDecision
+from geometry_msgs.msg import PointStamped
+from builtin_interfaces.msg import Time as TimeMsg
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
 
@@ -41,7 +43,8 @@ from hopping_robot.JumpLib.jumping_model import LinearJumpingController
 from hopping_robot.JumpLib.jumping_model import InPlaneJumpingModel
 from hopping_robot.JumpLib.waypoint_tracker import WaypointTracker
 from hopping_robot.JumpLib.push_controller import PushController, push_accel
-from hopping_robot.JumpLib.takeoff_solver import HopModel, clearance_apex, dilate, tilt_of, unit
+from hopping_robot.JumpLib.takeoff_solver import (HopModel, clearance_apex, composed_terrain, dilate,
+                                                  tilt_of, unit)
 from hopping_robot.JumpLib.touchdown import march_touchdown
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
@@ -211,6 +214,13 @@ class hopcopter(Node):
         self.side_clearance = 0.03    # the planner's side_clearance
         self.robot_radius = 0.15      # the body to the propeller tips
         self.apex_clear_margin = 0.01
+        # Terrain constrains an arc only where it is this far above both ends: the planner's
+        # clearance.active_tolerance (robot_params()); a LiDAR map's flat ground is a few mm rough
+        self.clearance_active_tol = 0.05
+        # ... and from a takeoff inside the inflation (beside an obstacle), the first metres read
+        # the terrain itself: the planner's clearance.start_exempt (robot_radius + side_clearance
+        # + half a cell's diagonal), so a robot that landed next to a pole can hop away
+        self.clearance_start_exempt = 0.15 + 0.03 + 0.1 * math.sqrt(2.0) / 2.0
         self.apex_raise_max = 0.5
         # A hop the leg cannot fly (leg angle under 40 deg) hops in place first, at most this high
         self.pump_apex_max = 1.5
@@ -229,9 +239,19 @@ class hopcopter(Node):
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
         # Ground elevation lookup from /elevation_map (_ground_elevation_at): the touchdown march,
-        # the push target's takeoff ground and the clearance re-check use it.
+        # the push target's takeoff ground and the clearance re-check use it. current_ground_z is
+        # the last foot contact's ground: where the map has no ground to offer, the robot is most
+        # likely still at the height it last stood on.
         self.current_ground_z = 0.0
         self._emap_data = None       # flat float array of the "elevation" layer
+        # A LiDAR map (hopcopter_perception) has an upper_bound layer: its NaN cells are unseen,
+        # not infinitely tall. Unseen cells with a bound are terrain at the bound for the
+        # clearance re-check (as for the planner); for the touchdown march they have no ground
+        # (the planner never lands there), and for a takeoff ground they fall back to the last
+        # foot contact. Without the layer (the hand-made maps) NaN stays an obstacle.
+        self._emap_lidar = False
+        self._emap_bound = None      # flat float array of the "upper_bound" layer
+        self._emap_cb_ms = []        # elevation_map_callback's run times, logged every 20 maps
         self._emap_floor = 0.0       # lowest ground on the map: the touchdown march ends there
         self._last_td = None         # the last predicted touchdown (JumpLib/touchdown.py), logged
         self._emap_res = 0.0
@@ -243,6 +263,7 @@ class hopcopter(Node):
         self._emap_inner_start = 0
         # The map as grid[ix, iy] (x, y increasing), dilated for the clearance re-check
         self._emap_field = None
+        self._emap_grid = None          # the same grid undilated (the clearance start exemption)
         self._emap_origin = (0.0, 0.0)  # lower corner of cell (0, 0)
 
         # Subscribe to trajectory from the ballistic motion planner
@@ -275,6 +296,11 @@ class hopcopter(Node):
             self.elevation_map_callback,
             emap_qos
         )
+
+        # For the LiDAR mapper: every touchdown's foot (a near-certain ground height), and for the
+        # planner: each steering apex's waypoint decision (which hops remain; when it hops in place)
+        self.foot_contact_pub = self.create_publisher(PointStamped, '/hopcopter/foot_contact', 10)
+        self.decision_pub = self.create_publisher(ApexDecision, '/hopcopter/apex_decision', 10)
 
         # Create a timer for publisher
         self.timer = self.create_timer(0.01, self.RPYT_commands) # 0.01 is 100 Hz, 0.002 is 500 Hz
@@ -527,11 +553,14 @@ class hopcopter(Node):
         self.push.imu(acc.z, self.imu_stamp)
 
     def elevation_map_callback(self, msg: GridMap) -> None:
-        """Cache the 'elevation' layer of the 2.5D map for ground lookups."""
+        """Cache the 'elevation' layer of the 2.5D map for ground lookups (and a LiDAR map's
+        'upper_bound'). It runs on the 100 Hz control thread, so its time is logged."""
+        t_cb = time.perf_counter()
         try:
             if 'elevation' not in msg.layers:
                 return
-            layer_idx = list(msg.layers).index('elevation')
+            layers = list(msg.layers)
+            layer_idx = layers.index('elevation')
             arr = msg.data[layer_idx]
             # grid_map stores column-major: outer dim = columns (y), inner = rows (x)
             if len(arr.layout.dim) >= 2:
@@ -548,6 +577,9 @@ class hopcopter(Node):
             self._emap_outer_start = msg.outer_start_index
             self._emap_inner_start = msg.inner_start_index
             self._emap_data = np.asarray(arr.data, dtype=np.float64)
+            self._emap_lidar = 'upper_bound' in layers
+            self._emap_bound = (np.asarray(msg.data[layers.index('upper_bound')].data, dtype=np.float64)
+                                if self._emap_lidar else None)
             finite = self._emap_data[np.isfinite(self._emap_data)]
             self._emap_floor = float(finite.min()) if finite.size else self.current_ground_z
             # grid[ix, iy] with x and y increasing: grid_map's row ru = nrows - 1 - ix, col
@@ -555,17 +587,32 @@ class hopcopter(Node):
             rb = (np.arange(nrows) + msg.inner_start_index) % nrows
             cb = (np.arange(ncols) + msg.outer_start_index) % ncols
             grid = self._emap_data.reshape(ncols, nrows)[np.ix_(cb, rb)].T[::-1, ::-1]
+            if self._emap_lidar:
+                # The planner's composed field: measured height, else the upper bound, else an
+                # obstacle (NaN, which dilate() makes infinitely tall)
+                bound = self._emap_bound.reshape(ncols, nrows)[np.ix_(cb, rb)].T[::-1, ::-1]
+                grid = composed_terrain(grid, bound)
+            self._emap_grid = grid
             self._emap_field = dilate(grid, self._emap_res, self.robot_radius + self.side_clearance)
             self._emap_origin = (self._emap_cx - 0.5 * nrows * self._emap_res,
                                  self._emap_cy - 0.5 * ncols * self._emap_res)
         except Exception as e:
             self.get_logger().error(f"Error in elevation_map_callback: {e}")
+        self._emap_cb_ms.append(1e3 * (time.perf_counter() - t_cb))
+        if len(self._emap_cb_ms) == 20:
+            self.get_logger().info(
+                f"elevation_map_callback on the control thread: mean {np.mean(self._emap_cb_ms):.1f} ms, "
+                f"max {np.max(self._emap_cb_ms):.1f} ms over 20 maps ({self._emap_nrows} x "
+                f"{self._emap_ncols} cells{', LiDAR map' if self._emap_lidar else ''})")
+            self._emap_cb_ms = []
 
-    def _ground_elevation_at(self, x, y):
+    def _ground_elevation_at(self, x, y, unseen=None):
         """Nearest-cell ground elevation at world (x, y) from the 2.5D map.
 
-        Returns the last known ground z when there is no map, the query falls
-        outside it, or the cell is an obstacle (NaN on the wire)."""
+        Returns the last foot contact's ground when there is no map, the query falls
+        outside it, or the cell is an obstacle (NaN on the wire). On a LiDAR map a NaN cell is
+        unseen, and `unseen`, if given, is returned for it instead (the touchdown march passes
+        the floor, so a fall over unseen ground goes on through it)."""
         if self._emap_data is None or self._emap_res <= 0.0:
             return self.current_ground_z
         res = self._emap_res
@@ -580,8 +627,12 @@ class hopcopter(Node):
         cb = (cu + self._emap_outer_start) % ncols
         z = self._emap_data[cb * nrows + rb]
         if not math.isfinite(z):
-            return self.current_ground_z
+            return unseen if (self._emap_lidar and unseen is not None) else self.current_ground_z
         return float(z)
+
+    def _is_unseen(self, x, y):
+        """A LiDAR map's cell at (x, y) has no measured height."""
+        return self._emap_lidar and math.isnan(self._ground_elevation_at(x, y, unseen=math.nan))
 
     def trajectory_callback(self, msg: Marker) -> None:
         """Handle incoming trajectory messages from /ballistic_trajectory"""
@@ -699,11 +750,14 @@ class hopcopter(Node):
         g_fall = self.hop_model.fall_g(tilt_of(axis))
         floor = min(self._emap_floor, self.current_ground_z)
         td = march_touchdown((self.pos_x, self.pos_y, z), v, axis, self.leg_length, g_fall,
-                             self._ground_elevation_at, floor)
+                             lambda x, y: self._ground_elevation_at(x, y, unseen=floor), floor)
         self._last_td = td
         self.LSE.estimation_now(v[0], v[1], td.t, self.pos_x, self.pos_y, abs_time)
         w = max(-v[2], 0.0)
-        return td.com, td.h, td.t, np.array([v[0], v[1], -(w + g_fall * td.t)]), td.ground
+        # A touchdown on unseen ground (a miss; the planner never lands there) takes off from
+        # the last foot contact's height, not the floor the march fell through to
+        ground = self.current_ground_z if self._is_unseen(*td.foot) else td.ground
+        return td.com, td.h, td.t, np.array([v[0], v[1], -(w + g_fall * td.t)]), ground
 
     def _lookahead_axis(self, j, v_land):
         """The body z axis expected at the touchdown on waypoint j, which sets where the foot lands
@@ -750,7 +804,9 @@ class hopcopter(Node):
         raised = 0.0
         if f.mode != 'pump' and j is not None and self._emap_field is not None:
             need = clearance_apex(self._emap_field, self._emap_origin, self._emap_res, foot, target,
-                                  ground_p, ground_p + dz, self.bottom_clearance)
+                                  ground_p, ground_p + dz, self.bottom_clearance,
+                                  active_tol=self.clearance_active_tol, terrain=self._emap_grid,
+                                  start_exempt=self.clearance_start_exempt)
             if need > f.apex:
                 raised = need + self.apex_clear_margin - h
                 if raised > self.apex_raise_max:
@@ -818,7 +874,27 @@ class hopcopter(Node):
         self.desired_x, self.desired_y = d.aim_x, d.aim_y
         hop.update({'decided': decided, 'land_before': land_before, 'foot': foot, 'fall_h': fall_h,
                     'fall_t': fall_t, 'v_in': v_in})
+        self._publish_decision(d, hop, foot, ground_p)
         return d, hop
+
+    def _sim_stamp(self):
+        """The latest Gazebo odometry stamp (sim time) as a message stamp."""
+        sec = int(self.odom_stamp)
+        return TimeMsg(sec=sec, nanosec=int(round((self.odom_stamp - sec) * 1e9)) % 1000000000)
+
+    def _publish_decision(self, d, hop, foot, ground):
+        """The waypoint decision of this apex, for the planner (/hopcopter/apex_decision)."""
+        msg = ApexDecision()
+        msg.header.stamp = self._sim_stamp()
+        msg.header.frame_id = 'world'
+        msg.path_id = 0.0 if self.path_id is None or not self.tracker.path else float(self.path_id)
+        msg.mode = d.mode
+        msg.land_index = -1 if d.land is None else int(d.land)
+        msg.retries = int(d.retries)
+        msg.aim.x, msg.aim.y, msg.aim.z = float(d.aim_x), float(d.aim_y), float(hop['apex'])
+        msg.foot.x, msg.foot.y, msg.foot.z = float(foot[0]), float(foot[1]), float(ground)
+        msg.hop_number = int(self.hop_number)
+        self.decision_pub.publish(msg)
 
     def _plan_values(self, k, j):
         """From the current path's HopPlan: the planned arrival and landing attitude at waypoint k
@@ -1064,6 +1140,14 @@ class hopcopter(Node):
                     f'{foot_x:.6f}', f'{foot_y:.6f}', f'{foot_z:.6f}',
                 ])
                 self.csv_file.flush()
+                # The ground the foot just met: the takeoff ground wherever the map has none, and a
+                # near-certain height for the LiDAR mapper
+                self.current_ground_z = foot_z
+                contact = PointStamped()
+                contact.header.stamp = self._sim_stamp()
+                contact.header.frame_id = 'world'
+                contact.point.x, contact.point.y, contact.point.z = foot_x, foot_y, foot_z
+                self.foot_contact_pub.publish(contact)
 
                 # --- Open per-hop tracking row (finalized at the next apex) ---
                 self.hop_number += 1

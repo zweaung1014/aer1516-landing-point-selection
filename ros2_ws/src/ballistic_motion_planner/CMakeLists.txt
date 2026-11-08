@@ -21,6 +21,8 @@ find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(hopcopter_msgs REQUIRED)
+# plan_check's partial-map cases use the scenarios' known maps (header-only)
+find_package(elevation_map_publisher REQUIRED)
 
 # Pure C++ planner core — no ROS dependencies, testable standalone.
 # NOTE: never add -ffast-math; speed binning relies on the default FP
@@ -28,7 +30,8 @@ find_package(hopcopter_msgs REQUIRED)
 add_library(ballistic_core STATIC
   src/map2d5.cpp
   src/ballistic_physics.cpp
-  src/hopping_astar.cpp)
+  src/hopping_astar.cpp
+  src/frontier.cpp)
 target_compile_features(ballistic_core PUBLIC cxx_std_17)
 target_include_directories(ballistic_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -44,7 +47,7 @@ target_link_libraries(ballistic_parity_test ballistic_core)
 
 # Offline check of the momentum_aware planner (stage 3 of docs/follow_planner_plan.md).
 add_executable(ballistic_plan_check src/plan_check_main.cpp)
-target_link_libraries(ballistic_plan_check ballistic_core)
+target_link_libraries(ballistic_plan_check ballistic_core elevation_map_publisher::scenarios)
 
 install(TARGETS ballistic_planner_node ballistic_parity_test ballistic_plan_check
   DESTINATION lib/${PROJECT_NAME})

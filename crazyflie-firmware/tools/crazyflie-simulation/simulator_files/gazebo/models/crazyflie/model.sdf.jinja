@@ -231,33 +231,95 @@
                     </mesh>
                 </geometry>
             </collision>
+            <!-- A Livox Mid-360 mounted upside down, 0.4 m above the base (D1 of
+                 docs/lidar_mapping_plan.md). Its frame (cf_N/lidar) is rolled 180 deg,
+                 so its 59 deg vertical FOV (-7..+52 deg in the sensor frame) looks
+                 52 deg below to 7 deg above the horizon. 10 Hz, 512 x 40 = 20480 rays
+                 per scan (the real one: 200 k points/s, a non-repetitive pattern that
+                 gpu_lidar cannot draw), 0.1-40 m, 2 cm range noise. It replaces a
+                 2048 x 64 ray, 60 Hz sensor pitched 15 deg down (CHANGELOG 2.4.0, for the
+                 removed local planner), ~40x a Mid-360's point rate. The env variables
+                 below are read by jinja_gen.py at spawn time. -->
             <sensor name="lidar_sensor" type="gpu_lidar">
-                <pose>0 0 0.4 0 0.2618 0</pose>  <!-- 15° downward tilt for ground coverage -->
+                <pose>0 0 0.4 3.14159265 0 0</pose>
                 <topic>/cf_{{ cf_id }}/lidar</topic>
-                <update_rate>60</update_rate>
+                <gz_frame_id>cf_{{ cf_id }}/lidar</gz_frame_id>
+                <update_rate>{{ env.get('LIDAR_RATE', '10') }}</update_rate>
                 <ray>
                     <scan>
                         <horizontal>
-                            <samples>2048</samples>
+                            <samples>512</samples>
                             <resolution>1</resolution>
-                            <min_angle>-3.14159</min_angle>
-                            <max_angle> 3.14159</max_angle>
+                            <min_angle>-3.14159265</min_angle>
+                            <max_angle>3.12932080</max_angle>  <!-- pi - 2 pi / 512: no duplicate ray -->
                         </horizontal>
                         <vertical>
-                            <samples>64</samples>
+                            <samples>40</samples>
                             <resolution>1</resolution>
-                            <min_angle>-0.5</min_angle>
-                            <max_angle> 0.5</max_angle>
+                            <min_angle>-0.12217305</min_angle>  <!-- -7 deg -->
+                            <max_angle>0.90757121</max_angle>   <!-- +52 deg -->
                         </vertical>
                     </scan>
                     <range>
-                        <min>0.05</min>
-                        <max>30.0</max>
-                        <resolution>0.005</resolution>
+                        <min>0.1</min>
+                        <max>40.0</max>
+                        <resolution>0.002</resolution>
                     </range>
+                    <noise>
+                        <type>gaussian</type>
+                        <mean>0.0</mean>
+                        <stddev>{{ env.get('LIDAR_RANGE_NOISE', '0.02') }}</stddev>
+                    </noise>
                 </ray>
                 <always_on>1</always_on>
-                <visualize>true</visualize>
+                <visualize>false</visualize>
+            </sensor>
+            <!-- The Mid-360's built-in IMU (an ICM-40609-D), at the LiDAR's pose: FAST-LIO
+                 uses this one. The real one outputs 200 Hz after its own anti-aliasing filter;
+                 Gazebo samples instantaneously, and at 200 Hz that aliases the touchdowns (the
+                 stance swings the mast top: one stance's x velocity integrated 6 m/s wrong).
+                 So it runs at 1 kHz here and lidar_sim_adapter averages it down to 200 Hz.
+                 White noise from the datasheet's densities (accel 100 ug/sqrt(Hz), gyro
+                 3.8 mdps/sqrt(Hz)) over half the sample rate, so the 200 Hz average has the
+                 datasheet's noise, plus a small constant bias. LIDAR_IMU_NOISE=0 turns the
+                 noise off, LIDAR_IMU_RATE sets the rate. The base_link IMU above (1 kHz, used
+                 by the firmware and hopcopter) is unchanged. Saturation is applied in
+                 lidar_sim_adapter (hopcopter_perception). -->
+            <sensor name="lidar_imu_sensor" type="imu">
+                <pose>0 0 0.4 3.14159265 0 0</pose>
+                <topic>/cf_{{ cf_id }}/lidar_imu</topic>
+                <gz_frame_id>cf_{{ cf_id }}/lidar</gz_frame_id>
+                <always_on>1</always_on>
+                {%- set rate = env.get('LIDAR_IMU_RATE', '1000') | float %}
+                <update_rate>{{ rate }}</update_rate>
+                {%- set k = env.get('LIDAR_IMU_NOISE', '1') | float %}
+                {%- set w = k * (rate / 2.0) ** 0.5 %}
+                <imu>
+                    <angular_velocity>
+                        {%- for axis in ['x', 'y', 'z'] %}
+                        <{{ axis }}>
+                            <noise type="gaussian">
+                                <mean>0</mean>
+                                <stddev>{{ 6.63e-5 * w }}</stddev>
+                                <bias_mean>{{ 5e-5 * k }}</bias_mean>
+                                <bias_stddev>{{ 2e-5 * k }}</bias_stddev>
+                            </noise>
+                        </{{ axis }}>
+                        {%- endfor %}
+                    </angular_velocity>
+                    <linear_acceleration>
+                        {%- for axis in ['x', 'y', 'z'] %}
+                        <{{ axis }}>
+                            <noise type="gaussian">
+                                <mean>0</mean>
+                                <stddev>{{ 9.8e-4 * w }}</stddev>
+                                <bias_mean>{{ 5e-3 * k }}</bias_mean>
+                                <bias_stddev>{{ 2e-3 * k }}</bias_stddev>
+                            </noise>
+                        </{{ axis }}>
+                        {%- endfor %}
+                    </linear_acceleration>
+                </imu>
             </sensor>
         </link>
         <link name="camera_link">

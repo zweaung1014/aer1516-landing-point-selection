@@ -41,6 +41,10 @@ def load(path):
     s["inflated"] = np.array(
         [np.inf if v is None else v for v in s["inflated"]], dtype=float
     ).reshape(shape)
+    # LiDAR maps: 1 = measured, 0 = unseen (its grid value is the upper bound, or
+    # OBSTACLE when unbounded). Hand-made maps have no mask: all measured.
+    if "measured" in s:
+        s["measured"] = np.array(s["measured"], dtype=float).reshape(shape)
     res = s["resolution"]
     s["extent"] = [s["origin_x"], s["origin_x"] + s["cols"] * res,
                    s["origin_y"], s["origin_y"] + s["rows"] * res]
@@ -73,6 +77,13 @@ def draw_path_figure(s):
     sm = plt.cm.ScalarMappable(cmap=plt.get_cmap("Greys"), norm=norm)
     sm.set_array([])
     fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.02).set_label("Elevation (m)")
+    unseen = None
+    if "measured" in s:
+        # Unseen but bounded: the planner flies over it above the bound, never lands
+        unseen = (s["measured"] < 0.5) & ~obstacle
+        ax.imshow(np.ma.masked_where(~unseen, np.ones_like(grid)), origin="lower",
+                  extent=s["extent"], cmap=mcolors.ListedColormap(["orange"]), alpha=0.35,
+                  interpolation="nearest")
 
     path = s["path"]
     if path:
@@ -94,7 +105,10 @@ def draw_path_figure(s):
                         fontsize=7, color="darkred", zorder=6)
 
     ax.plot(*s["start"], "go", markersize=10, label="Start")
-    ax.plot(*s["goal"], "r*", markersize=15, label="Goal")
+    ax.plot(*s["goal"], "r*", markersize=15, label="Frontier" if s.get("frontier") else "Goal")
+    if s.get("frontier"):
+        ax.plot(*s["final_goal"], "m*", markersize=15, label="Goal (not seen yet)")
+        ax.set_title("A* Path Planning on 2.5D Map (frontier plan)")
 
     r_body = s["robot_radius"]
     mc = s["side_clearance"]
@@ -112,7 +126,10 @@ def draw_path_figure(s):
 
     handles, labels = ax.get_legend_handles_labels()
     handles.append(mpatches.Patch(facecolor="black", alpha=0.85, label="Obstacle"))
-    labels.append("Obstacle")
+    labels.append("Obstacle" if unseen is None else "Obstacle or unseen, unbounded")
+    if unseen is not None:
+        handles.append(mpatches.Patch(facecolor="orange", alpha=0.35))
+        labels.append("Unseen, bounded (height = bound)")
     # Below the axes: inside, it always lands on the path or the terrain.
     ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.08),
               ncol=4, fontsize=8, frameon=False)

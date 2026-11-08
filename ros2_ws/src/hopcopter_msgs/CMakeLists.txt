@@ -9,6 +9,7 @@ find_package(geometry_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PlannedHop.msg"
   "msg/HopPlan.msg"
+  "msg/ApexDecision.msg"
   DEPENDENCIES std_msgs geometry_msgs)
 
 ament_export_dependencies(rosidl_default_runtime)

@@ -9,7 +9,11 @@
 //    one push's capacity;
 //  - the three plans docs/follow_planner_plan.md expects come out unchanged.
 // It also reports search effort against the reference search on the same
-// problem. Exits 1 if any check fails.
+// problem. Then it plans on partial LiDAR maps (docs/lidar_mapping_plan.md,
+// stage 4): low_wall with the wall's shadow unseen but bounded, lilypads with
+// the pit unseen, an unmeasured start (the guard refuses it) and a goal not yet
+// seen (a frontier plan). On those, no hop may land on an unseen cell, and every
+// arc must clear the bound. Exits 1 if any check fails.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -19,8 +23,10 @@
 #include <vector>
 
 #include "ballistic_motion_planner/ballistic_physics.hpp"
+#include "ballistic_motion_planner/frontier.hpp"
 #include "ballistic_motion_planner/hopping_astar.hpp"
 #include "ballistic_motion_planner/map2d5.hpp"
+#include "elevation_map_publisher/scenarios.hpp"
 
 using ballistic::Hop;
 using ballistic::Map2D5;
@@ -320,6 +326,137 @@ int main()
     std::snprintf(line, sizeof(line), "%s: %zu hops, max tilt %.1f, %s", c.name.c_str(),
       r.hops.size(), worst, fails.empty() ? "pass" : "FAIL");
     summary.push_back(line);
+  }
+
+  // ---- Partial LiDAR maps (stage 4 of docs/lidar_mapping_plan.md) ----
+  {
+    const PlannerParams p = ballistic::robot_params();
+    // A scenario's known map, as elevation_map_publisher publishes it.
+    auto known = [](const std::string & sc) {
+        const auto & g = elevation_map_publisher::scenarios().at(sc);
+        Map2D5 m(g.size_x, g.size_y, 0.1, g.origin_x, g.origin_y);
+        for (int r = 0; r < m.rows(); ++r) {
+          for (int c = 0; c < m.cols(); ++c) {
+            const auto [x, y] = m.grid_to_world(r, c);
+            const double z = static_cast<float>(elevation_map_publisher::world_z(sc, x, y));
+            m.at(r, c) = z >= 5.0 ? Map2D5::OBSTACLE : z;
+          }
+        }
+        return m;
+      };
+    // Mark the cells pred() selects unseen, with the bound bound(x, y), as
+    // planner_node's convertMap reads a LiDAR map.
+    auto unsee = [](Map2D5 & m, auto pred, auto bound) {
+        std::vector<uint8_t> landable(static_cast<size_t>(m.rows()) * m.cols(), 1);
+        for (int r = 0; r < m.rows(); ++r) {
+          for (int c = 0; c < m.cols(); ++c) {
+            const auto [x, y] = m.grid_to_world(r, c);
+            if (pred(x, y, m.at(r, c))) {
+              landable[static_cast<size_t>(r) * m.cols() + c] = 0;
+              m.at(r, c) = bound(x, y);
+            }
+          }
+        }
+        m.set_landable(std::move(landable), 0.1, 0.3, 0.08);  // the node's standable.* margins
+      };
+    auto check_partial = [&](const std::string & name, const Map2D5 & m, double sx, double sy,
+      double gx, double gy) {
+        std::printf("\n== partial map: %s: (%.2f, %.2f) -> (%.2f, %.2f)\n", name.c_str(), sx, sy, gx, gy);
+        Case c{name, "", sx, sy, gx, gy, {}};
+        const Run r = run(m, c, p);
+        std::vector<std::string> fails;
+        if (!r.path) {
+          fails.push_back("no path");
+        } else {
+          print_plan(r, p);
+          for (size_t i = 1; i < r.path->size(); ++i) {
+            const auto [row, col] = m.world_to_grid((*r.path)[i].first, (*r.path)[i].second);
+            if (!m.landable(row, col)) {
+              fails.push_back("waypoint " + std::to_string(i) + " lands on an unseen cell");
+            }
+          }
+          for (const auto & st : r.stances) {
+            if (st.tilt > p.tau_max + 1e-9) {fails.push_back("landing tilt over the cap");}
+          }
+        }
+        for (const auto & f : fails) {std::printf("  FAIL: %s\n", f.c_str());}
+        failures += static_cast<int>(!fails.empty());
+        summary.push_back("partial " + name + ": " + (fails.empty() ? std::to_string(r.hops.size()) +
+          " hops, pass" : std::string("FAIL")));
+      };
+
+    // low_wall seen from the start's apex: the ground behind the wall (x 2.7-3.6)
+    // hidden, bounded by the rays that grazed the wall's top, 0.4 m down to 0.
+    Map2D5 lw = known("low_wall");
+    unsee(lw, [](double x, double, double) {return x >= 2.7 && x < 3.6;},
+      [](double x, double) {return 0.4 * (3.6 - x) / 0.9 + 0.05;});
+    check_partial("low_wall, shadow unseen (bound 0.45 -> 0.05)", lw, 0.0, 0.0, 4.0, 0.0);
+
+    // low_wall as the 2026-11-07 FAST-LIO run mapped it: the face hits raised the cell
+    // in front of the wall (0.35) and the one behind it (0.4), and the shadow beyond is
+    // bounded at the wall's height. The wall then reads as a 0.4 m platform from x 2.4
+    // to 2.8, and the planner landed on it; the robot came down on its front edge. No
+    // hop may land on x 2.3-2.9 now.
+    Map2D5 wt = known("low_wall");
+    unsee(wt, [](double x, double, double) {return x >= 2.8 && x < 3.6;},
+      [](double x, double) {return x < 3.0 ? 0.45 : 0.4 * (3.6 - x) / 0.6 + 0.05;});
+    for (int r = 0; r < wt.rows(); ++r) {
+      for (int c = 0; c < wt.cols(); ++c) {
+        const double x = wt.grid_to_world(r, c).first;
+        if (x > 2.4 && x < 2.5) {wt.at(r, c) = 0.35;}
+        if (x > 2.7 && x < 2.8) {wt.at(r, c) = 0.4;}
+      }
+    }
+    {
+      Case c{"wall top", "", 0.0, 0.0, 4.0, 0.0, {}};
+      const Run r = run(wt, c, p);
+      bool on_wall = !r.path;
+      if (r.path) {
+        for (const auto & [x, y] : *r.path) {on_wall = on_wall || (x > 2.3 && x < 2.9);}
+        std::printf("\n== partial map: low_wall, wall widened by face hits: %zu hops%s\n", r.hops.size(),
+          on_wall ? ", LANDS ON THE WALL" : ", none on the wall");
+        print_plan(r, p);
+      } else {
+        std::printf("\n== partial map: low_wall, wall widened by face hits: NO PATH\n");
+      }
+      failures += on_wall;
+      summary.push_back(std::string("partial low_wall, wall widened by face hits: ") +
+        (on_wall ? "FAIL" : "pass"));
+    }
+
+    // lilypads from the start platform: the pit (ground at 0) hidden behind the
+    // pads, bounded at 1.5 m, below every pad top (1.8-2.2).
+    Map2D5 lp = known("lilypads");
+    unsee(lp, [](double, double, double z) {return z < 0.5;}, [](double, double) {return 1.5;});
+    check_partial("lilypads, pit unseen (bound 1.5)", lp, 0.0, 0.0, 11.75, 0.0);
+
+    // The start guard: an unmeasured start is refused.
+    Map2D5 us = known("low_wall");
+    unsee(us, [](double x, double y, double) {return std::hypot(x, y) < 0.3;},
+      [](double, double) {return 0.4;});
+    const bool refused = !ballistic::start_measured(us, 0.0, 0.0) &&
+      ballistic::start_measured(us, 1.0, 0.0);
+    std::printf("\n== partial map: unmeasured start: the guard %s it\n", refused ? "refuses" : "ACCEPTS");
+    failures += !refused;
+    summary.push_back(std::string("partial unmeasured start: ") + (refused ? "refused, pass" : "FAIL"));
+
+    // A goal not seen yet: flat with everything past x 2.5 unseen and unbounded
+    // (OBSTACLE). The frontier is the reachable cell nearest the goal.
+    Map2D5 fr = known("flat");
+    unsee(fr, [](double x, double, double) {return x >= 2.5;},
+      [](double, double) {return Map2D5::OBSTACLE;});
+    const auto standable = fr.standable_mask(p.robot_radius, p.side_clearance, p.steep_grade);
+    const auto cand = ballistic::frontier_candidates(fr, standable, {0.0, 0.0}, {4.0, 0.0});
+    if (cand.empty()) {
+      std::printf("\n== partial map: frontier: no candidate\n  FAIL\n");
+      ++failures;
+      summary.push_back("partial frontier: FAIL");
+    } else {
+      const auto [fx, fy] = fr.grid_to_world(cand.front().first, cand.front().second);
+      std::printf("\n== partial map: frontier: %zu candidates, nearest the goal (%.2f, %.2f)\n",
+        cand.size(), fx, fy);
+      check_partial("flat, goal unseen: frontier plan", fr, 0.0, 0.0, fx, fy);
+    }
   }
 
   std::printf("\n== Summary\n");

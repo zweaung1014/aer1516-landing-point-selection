@@ -23,9 +23,15 @@ is not built, launched, or imported by the simulation, and nothing in `ros2_ws/`
 it. Read its own `CLAUDE.md` (thorough, 579 lines) and `docs/planner.md` before changing the
 algorithm. Do not "fix", refactor, or wire up the standalone copy unless explicitly asked.
 
-The elevation map is published by `elevation_map_publisher/` as a **known** map (LiDAR-based
-map building comes later). An earlier 2D pipeline (an OMPL RRT\* global planner plus a PCL
-landing-point local planner) has been **removed** — do not reintroduce it.
+The elevation map comes from one of two sources, both on `/elevation_map`:
+- `elevation_map_publisher/` publishes a **known**, hand-made map of each world (the known-map
+  mode, for controller work);
+- `hopcopter_perception/` builds it from the **LiDAR**: Gazebo's Mid-360 → FAST-LIO →
+  `lidar_elevation_mapper` (docs/lidar_mapping_plan.md). The known map then goes on
+  `/elevation_map_known`, as the ground truth the LiDAR map is scored against.
+
+An earlier 2D pipeline (an OMPL RRT\* global planner plus a PCL landing-point local planner) has
+been **removed** — do not reintroduce it.
 
 ## Repository layout
 
@@ -38,7 +44,8 @@ under `crazyflie-firmware/tools/crazyflie-simulation/`). The project's own code 
 |---|---|
 | `ros2_ws/src/ballistic_motion_planner/` | C++ hopping-aware A* planner (`ballistic_planner_node`) |
 | `ros2_ws/src/hopcopter_msgs/` | `HopPlan` / `PlannedHop` messages: each planned hop's takeoff |
-| `ros2_ws/src/elevation_map_publisher/` | C++ publisher of the known 2.5D `/elevation_map` (`elevation_map_publisher_node`) |
+| `ros2_ws/src/elevation_map_publisher/` | C++ publisher of the known 2.5D `/elevation_map` (`elevation_map_publisher_node`); the scenarios' maps in a header (`scenarios.hpp`) |
+| `ros2_ws/src/hopcopter_perception/` | The LiDAR pipeline: `lidar_sim_adapter`, `gz_truth_tf`, `lio_anchor`, `lidar_elevation_mapper`, FAST-LIO's config, the bridge YAML, `lidar_mapping.launch.py`, `mapper_check` |
 | `ros2_ws/src/hopping_robot/` | Python hop controller (`hopcopter`) + `JumpLib`/`RisLib` |
 | `ros2_ws/src/nlp_goal_interface/` | Python Claude-powered goal parser (`nlp_goal_node`) |
 | `ros2_ws/src/tf_transform_broadcast/` | Python TF broadcaster |
@@ -62,7 +69,12 @@ Python packages (`hopping_robot`, `nlp_goal_interface`, `tf_transform_broadcast`
 
 Running the simulation takes **seven terminals**, each sourced as above; `README.md` has the
 exact commands in order (Gazebo SITL → cflib server → IMU/odom `ros_gz_bridge` →
-`elevation_map_publisher` → `ballistic_planner_node` → `hopcopter`). Nothing starts moving
+`elevation_map_publisher` → `ballistic_planner_node` → `hopcopter`). With the LiDAR map it takes
+five: Gazebo with `-H`, the cflib server, `ros2 launch hopcopter_perception lidar_mapping.launch.py
+scenario:=<world>` (in place of the bridges and the map publisher), the planner and hopcopter.
+FAST-LIO and the Livox driver are overlays outside the repo: source `/opt/ros/humble` →
+`~/ws_livox/install` → `~/fastlio_ws/install` → `ros2_ws/install` (FAST_LIO_ROS2 at `18418bc`).
+Nothing starts moving
 until **Play** is pressed in the Gazebo GUI. A goal then goes in either by publishing
 `/goal_pose` directly or by running `nlp_goal_node`.
 
@@ -72,11 +84,13 @@ contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
 `cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py test/test_takeoff_solver.py test/test_touchdown.py`.
 They cover waypoint decisions, the braking tilt guard, the push cutoff, and the takeoff solve
 (each solved hop lands on its target, also under an independent step integration; the guards; the
-clearance re-check). The planner has two
+clearance re-check, also on a LiDAR map's composed field), 87 tests in all. The planner has two
 offline executables (no ROS graph): `ros2 run ballistic_motion_planner ballistic_parity_test`
 (the reference search against the Python port; its output must stay byte-identical) and
 `ballistic_plan_check` (the momentum-aware search on 15 cases: landing tilts, the expected plans,
-and the controller's leg-angle guard and push capacity with real speeds for η 0.71–0.85; ~2 min,
+and the controller's leg-angle guard and push capacity with real speeds for η 0.71–0.85; then 5
+partial LiDAR maps; ~2 min, exits 1 on a failure). `ros2 run hopcopter_perception mapper_check`
+flies a simulated Mid-360 along each world's known-map plan and scores the map it builds (~1 min,
 exits 1 on a failure). Everything else is verified by running the sim and inspecting the CSVs it
 writes (below).
 
@@ -112,8 +126,9 @@ the stance model (stage 4). Both read hopcopter's newest per-tick
 **1. `ballistic_planner_node`** (`ballistic_motion_planner/src/ballistic_planner_node.cpp`)
 subscribes to the 2.5D `/elevation_map` (`grid_map_msgs/GridMap`, transient_local), the robot
 pose, and `/goal_pose`. On each goal it runs a hopping-aware **A\*** search over the elevation
-map (each move a physically feasible parabolic hop) and publishes the path **once** — there is
-no replan timer. The path travels as a `Marker` SPHERE_LIST (id=400) on `/ballistic_trajectory`
+map (each move a physically feasible parabolic hop) and publishes the path **once** on a
+hand-made map. On a LiDAR map it re-checks the rest of the plan on every map update and replans
+from a hold when it fails (3b below). The path travels as a `Marker` SPHERE_LIST (id=400) on `/ballistic_trajectory`
 (**waypoints travel as marker points, not a `nav_msgs/Path`**), with the robot's position at
 planning time on `/trajectory_start_position`. Per-waypoint z is the **`target_apex`** of the
 hop that lands on that waypoint — the planned apex height above that hop's takeoff ground
@@ -122,7 +137,8 @@ on. It is a relative height, not a world z. Just before the marker pair, with th
 it publishes `hopcopter_msgs/HopPlan` on `/ballistic_hop_plan`: each hop's heading, leg angle
 α_leg, v_h, target apex and injection, its expected arrival velocity, and the landing attitude
 and tilt that redirect the robot into the next hop. hopcopter logs every commanded takeoff and
-landing against it. The node works entirely in the world frame and does not use TF or the LiDAR.
+landing against it. The node works entirely in the world frame and does not use TF or the LiDAR (only the map built
+from it).
 
 By default (`search.momentum_aware`, with the robot's parameters from
 `ballistic::robot_params()`) the search models the robot that flies the plan: a vertical push,
@@ -206,7 +222,46 @@ and maze edited so the robot can plan them), `lilypads` (2 m platforms and pads,
 (the same platforms with seven 12–20° sloped pads in a forced zigzag; `-z 3.4`). Each has a Gazebo twin `worlds/crazysim_<scenario>.sdf`,
 placed so the reference START is world (0, 0). The README's "Other worlds" table has the goals. `ballistic_planner_node`
 cannot plan without it. `hopcopter` caches it too: the ground under each predicted touchdown and
-takeoff, and the clearance re-check. LiDAR-based map building is future work.
+takeoff, and the clearance re-check. With the LiDAR pipeline (3b) it publishes on
+`/elevation_map_known` instead (`topic:=`), as the mapper's ground truth.
+
+**3b. `hopcopter_perception`** (the LiDAR map; docs/lidar_mapping_plan.md has the design and
+CHANGELOG.md the reasons for its parameters):
+- **Sensors.** The model's LiDAR is a Livox Mid-360 mounted upside down 0.4 m above the base
+  (frame `cf_0/lidar`, rolled 180°): 10 Hz, 512 × 40 rays over −52…+7°. Its IMU is a second
+  `imu` sensor at the same pose, at 1 kHz. The base_link IMU is unchanged.
+- **`lidar_sim_adapter`.** The finite points outside 0.3 m go to `/lidar/points` (the mapper's)
+  and every 3rd of them to `/lio/points` (FAST-LIO's). The IMU is averaged to 200 Hz on `/lio/imu`
+  (a real IMU's anti-aliasing; Gazebo's instantaneous samples alias a stance), and can be clipped
+  at the sensor's range.
+- **FAST-LIO** (`fastlio_mapping`, `config/fast_lio_sim.yaml`) publishes `camera_init → body`.
+- **Hold and release.** `sitl_singleagent.sh -H` holds the robot with a DetachableJoint (a hidden
+  static parent model) until `lio_anchor` publishes `/cf_0/release`. `lio_anchor` does that once
+  FAST-LIO has run for 1 s, after publishing the static `world → camera_init` from one held pose
+  (T(world ← imu, Gazebo) · T(camera_init ← imu, FAST-LIO)⁻¹). It logs FAST-LIO against Gazebo
+  to `data/data_lio/`. `gz_truth_tf` puts Gazebo's pose in TF (`world → cf_0/base_link →
+  cf_0/lidar`).
+- **`lidar_elevation_mapper`** looks each cloud's pose up in TF at its stamp:
+  - on FAST-LIO, the raw scan read as `body`;
+  - with `pose_source:=gazebo`, the scan in `cf_0/lidar` on Gazebo's pose.
+
+  It publishes `/elevation_map` at 2 Hz with layers `elevation` (NaN = no usable height),
+  `upper_bound` (NaN = no ray bounds it), `variance` and `hits`. Foot contacts from hopcopter
+  (`/hopcopter/foot_contact`) are near-certain heights, and the first one fills a 0.6 m start disk.
+  It scores itself against `/elevation_map_known` (`data/data_elevation_map/`).
+- **The map contract.** A map with an `upper_bound` layer is a LiDAR map:
+  - an unseen cell with a bound is terrain at the bound for the clearance tests (planner and
+    hopcopter) but never a landing;
+  - an unseen, unbounded cell is OBSTACLE;
+  - landings keep 0.3 m from unseen cells and a cell further from steep edges, and steps count as
+    edges 8 cm sooner;
+  - a hand-made map (no layer) keeps every finite cell landable.
+
+  On a LiDAR map the planner also refuses an unmeasured start, makes frontier plans to goals not
+  yet seen, and holds and replans when the map invalidates the plan (`/hopcopter/apex_decision`
+  tells it which hops remain and when the robot hops in place).
+- **Clocks.** The perception nodes run on sim time (`/clock` from the bridge); the planner,
+  hopcopter and `elevation_map_publisher` on wall time, as before.
 
 **4. `nlp_goal_node`** (`nlp_goal_interface/`) is a terminal REPL that calls the Anthropic
 API with two tools (`extract_coordinates`, `approach_object`) and publishes the result on
@@ -226,13 +281,18 @@ and controller work in the world frame) but is kept for RViz and legacy consumer
   `ros2_ws/src/crazyswarm2/crazyflie/config/crazyflies.yaml`. `hopcopter` subscribes to both
   and the mismatch is intentional — do not "normalize" it.
 - **Absolute paths are hardcoded** to `/home/zweminhtetaung/CrazySim/data/...` in the CSV
-  loggers (e.g. `hopcopter.py`, `ballistic_planner_node.cpp`). CSV logging breaks silently
-  for any other checkout location.
+  loggers (e.g. `hopcopter.py`, `ballistic_planner_node.cpp`; `lio_anchor` and
+  `lidar_elevation_mapper` take a `data_dir` parameter). CSV logging breaks silently for any
+  other checkout location.
 - **Edit the model template, not the model.** The robot's SDF is generated at launch by
   `jinja_gen.py` from `models/crazyflie/model.sdf.jinja` into `/tmp/crazyflie_0.sdf`. Changes
-  to `model.sdf` are discarded. The LiDAR's 15° downward tilt (`0.2618` rad, line ~235) is a
-  deliberate tuning left over from the removed local planner — see `CHANGELOG.md` 2.4.0 before
-  touching it.
+  to `model.sdf` are discarded. The LiDAR is an upside-down Mid-360 (the 15°-pitched 2048 × 64
+  sensor of CHANGELOG 2.4.0 is gone). `jinja_gen.py` passes the environment to the template:
+  `LIDAR_IMU_RATE`, `LIDAR_IMU_NOISE`, `LIDAR_RATE` and `LIDAR_RANGE_NOISE` change the sensors.
+- **FAST-LIO's IMU queue is 10 deep, on the thread that processes scans.** A scan slower than
+  50 ms can drop a touchdown's IMU samples, and the pose jumps. That is why the adapter sends
+  FAST-LIO every 3rd point: keep its scans fast (median 18 ms) if you change the LiDAR or the
+  config. Likewise keep the LiDAR IMU averaged: raw 200 Hz Gazebo samples alias the stance.
 - **`CHANGELOG.md` records why parameters have their values.** Consult it before retuning the
   ballistic planner or the hop controller; several defaults look arbitrary and are not.
 - **hopcopter sends zero thrust for one tick at every apex, on purpose.** The firmware resets its

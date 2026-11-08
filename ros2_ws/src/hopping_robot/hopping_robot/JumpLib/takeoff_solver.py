@@ -349,6 +349,16 @@ def steep_mask(grid, res, min_grade=math.tan(math.radians(60.0))):
     return mask
 
 
+def composed_terrain(elevation, upper_bound=None):
+    """The terrain the planner's clearance test sees on a LiDAR map (docs/lidar_mapping_plan.md,
+    "The map contract"): the measured height where there is one, else the upper bound the rays
+    put on an unseen cell, else NaN (unseen and unbounded: an obstacle, as dilate() treats NaN).
+    Without a bound layer (a hand-made map) the elevation is returned unchanged."""
+    if upper_bound is None:
+        return elevation
+    return np.where(np.isfinite(elevation), elevation, upper_bound)
+
+
 def dilate(grid, res, radius, steep_grade=math.tan(math.radians(60.0))):
     """The planner's inflated field (Map2D5::inflated_field): the highest terrain edge (steep_mask)
     within radius of each cell, never below the cell's own ground; NaN cells count as +inf. Only
@@ -369,13 +379,19 @@ def dilate(grid, res, radius, steep_grade=math.tan(math.radians(60.0))):
     return np.maximum(out, filled)
 
 
-def clearance_apex(field, origin, res, p, target, ground_p, ground_t, gate, max_step=0.05):
+def clearance_apex(field, origin, res, p, target, ground_p, ground_t, gate, max_step=0.05,
+                   active_tol=0.0, terrain=None, start_exempt=0.0):
     """The least apex, above the takeoff ground, at which the hop from p to target passes the
     planner's clearance test (clearance_floor_alpha): wherever the dilated terrain under the
-    centreline is above both ends, the parabola through both ends must clear it by gate. -inf when
+    centreline is more than active_tol above both ends (the planner's clearance.active_tolerance:
+    0.05 for the robot, which a LiDAR map's few-mm roughness needs), the parabola through both
+    ends must clear it by gate. -inf when
     no terrain constrains the hop. field[i, j] is the dilated terrain of the cell whose lower corner
     is origin + (i, j) res. Points off the map do not constrain it: the planner never plans there,
-    and the controller's map has nothing to say about them."""
+    and the controller's map has nothing to say about them. If the takeoff's own cell lies inside
+    the inflation (an obstacle or edge beside it), the first start_exempt metres read `terrain`
+    (the undilated grid, NaN = obstacle) instead, as the planner's clearance.start_exempt does:
+    a robot that landed next to a pole can still hop away from it."""
     p = np.asarray(p, dtype=float)
     target = np.asarray(target, dtype=float)
     X = float(np.linalg.norm(target - p))
@@ -385,6 +401,12 @@ def clearance_apex(field, origin, res, p, target, ground_p, ground_t, gate, max_
     n = max(3, int(math.ceil(X / min(max_step, res / 3.0))) + 1)
     top = max(ground_p, ground_t)
     max_t = -math.inf                        # least tan of the launch angle over all samples
+    exempt = 0.0
+    if terrain is not None and start_exempt > 0.0:
+        i0 = int(math.floor((p[0] - origin[0]) / res))
+        j0 = int(math.floor((p[1] - origin[1]) / res))
+        if 0 <= i0 < field.shape[0] and 0 <= j0 < field.shape[1] and field[i0, j0] > ground_p + 1e-9:
+            exempt = start_exempt
     for i in range(1, n - 1):
         u = X * i / (n - 1)
         c = p + (target - p) * (u / X)
@@ -393,10 +415,14 @@ def clearance_apex(field, origin, res, p, target, ground_p, ground_t, gate, max_
         if not (0 <= ci < field.shape[0] and 0 <= cj < field.shape[1]):
             continue
         f = field[ci, cj]
-        if f > top:
+        if u <= exempt:
+            f = terrain[ci, cj] if math.isfinite(terrain[ci, cj]) else math.inf
+        if f > top + active_tol:
             max_t = max(max_t, (f + gate - ground_p - Z * u * u / (X * X)) / (u * (X - u) / X))
     if max_t == -math.inf:
         return -math.inf
+    if max_t == math.inf:
+        return math.inf    # an infinitely tall cell under the arc: no apex clears it (was NaN)
     # The parabola z(u) = a u - k u^2 through (X, Z) with launch slope a peaks at a^2 / (4 k)
     k = (max_t * X - Z) / (X * X)
     if k <= 0.0 or max_t / (2.0 * k) >= X:

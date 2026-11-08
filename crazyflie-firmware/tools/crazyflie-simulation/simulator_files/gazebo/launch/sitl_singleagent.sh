@@ -41,6 +41,32 @@ function spawn_model() {
 	echo "Spawning ${MODEL}_${N} at ${X} ${Y} ${Z}"
 
     gz service -s /world/${world}/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 300 --req 'sdf_filename: "/tmp/'${MODEL}_${N}'.sdf", pose: {position: {x:'${X}', y:'${Y}', z: '${Z}'}}, name: "'${MODEL}_${N}'", allow_renaming: 1'
+
+	if [ "$HOLD" == "1" ]; then
+		# -H: hold the robot where it spawns until something publishes on
+		# /cf_N/release (hopcopter_perception's lio_anchor, once FAST-LIO is up).
+		# A hidden static model is the DetachableJoint's parent and the robot its
+		# child: the joint keeps the robot still with motors idle, and the robot
+		# drops when it detaches, as it does at Play without -H.
+		cat > /tmp/${MODEL}_${N}_holder.sdf <<EOF_HOLDER
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <model name="${MODEL}_${N}_holder">
+    <static>true</static>
+    <link name="link"/>
+    <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+      <parent_link>link</parent_link>
+      <child_model>${MODEL}_${N}</child_model>
+      <child_link>base_link</child_link>
+      <detach_topic>/cf_${N}/release</detach_topic>
+      <suppress_child_warning>true</suppress_child_warning>
+    </plugin>
+  </model>
+</sdf>
+EOF_HOLDER
+		echo "Holding ${MODEL}_${N} until /cf_${N}/release"
+		gz service -s /world/${world}/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 300 --req 'sdf_filename: "/tmp/'${MODEL}_${N}'_holder.sdf", pose: {position: {x:'${X}', y:'${Y}', z: '${Z}'}}, name: "'${MODEL}_${N}'_holder", allow_renaming: 0'
+	fi
 	
 	echo "starting instance $N in $(pwd)"
 	$build_path/cf2 $((19950+${N})) > out.log 2> error.log &
@@ -51,11 +77,13 @@ function spawn_model() {
 if [ "$1" == "-h" ] || [ "$1" == "--help" ]
 then
     echo "Description: This script is used to spawn a single vehicle in gazebo."
-	echo "Usage: $0 [-m <vehicle_model>] [-n <x_coordinate>] [-y <y_coordinate>] [-z <z_coordinate>] [-w <world>]"
+	echo "Usage: $0 [-m <vehicle_model>] [-n <x_coordinate>] [-y <y_coordinate>] [-z <z_coordinate>] [-w <world>] [-H]"
+	echo "  -H: hold the robot at its spawn pose until /cf_0/release (the LiDAR pipeline's lio_anchor)"
 	exit 1
 fi
 
-while getopts m:x:y:z:w: option
+HOLD=0
+while getopts m:x:y:z:w:H option
 do
 	case "${option}"
 	in
@@ -64,6 +92,7 @@ do
         y) Y_CORD=${OPTARG};;
         z) Z_CORD=${OPTARG};;
 		w) WORLD=${OPTARG};;
+		H) HOLD=1;;
 	esac
 done
 

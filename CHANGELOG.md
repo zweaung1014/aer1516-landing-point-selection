@@ -2,24 +2,79 @@
 
 ## [Unreleased]
 
-### Fixed
-- **The touchdown march no longer misses a pad landed on near its far rim**
-  (`JumpLib/touchdown.py`; `test_far_rim_of_a_pad`, `test_far_rim_onto_lower_ground`,
-  `test_falls_off_a_rim`). The march only stopped at a sample where the foot was at or below the
-  ground. A foot that reached a pad's top between two samples and passed its far rim before the
-  next was above the gap at that sample, so the pad was skipped. On the 2026-11-06 lilypads run
-  the foot landed 2 cm inside the far rim of the pad at (7.8, −0.5): 8 cm above the pad at the
-  x 8.10 sample, over the gap at x 8.30. The march went on to the gap floor (touchdown x 9.0,
-  2.75 m fall, 7.2 m/s arrival) while the robot landed at x 8.13. The takeoff was solved from the
-  gap floor, the push target (0.8 m above ground 0) sat below the pad, so the hop off it was
-  leg-only, landed on the near rim of the pad at (10.2, −0.6), and the robot flipped there. Now,
-  whenever the ground drops from one sample to the next, the closed form is also solved for the
-  previous sample's surface, and if the foot is still over it at that time, that is the touchdown.
-  The sample spacing `ds` is 0.05 m (was 0.2 m), half a map cell, so no cell is stepped over; at
-  ~20 lookups per fall the cost is negligible. Replaying that apex: CoM touchdown x 8.137 against
-  8.133 measured. The old march misses it at 0.05 m too; the rim check is the fix.
-
 ### Added
+- **The elevation map is built from the LiDAR** (docs/lidar_mapping_plan.md, stages 0–5; new
+  package `hopcopter_perception`). Gazebo's LiDAR and its IMU go through FAST-LIO to a new mapper,
+  which publishes `/elevation_map` for the unchanged planner and hopcopter.
+  `elevation_map_publisher` now publishes the scenario's known map on `/elevation_map_known` and
+  is the ground truth the LiDAR map is scored against. One launch file
+  (`ros2 launch hopcopter_perception lidar_mapping.launch.py scenario:=<world>`) replaces the
+  README's Terminals 3–5. Gazebo starts with `-H`, which holds the robot until FAST-LIO is up.
+  - **The sensors (D1).** The model's LiDAR is a Livox Mid-360 mounted upside down, 0.4 m above
+    the base. It runs at 10 Hz with 512 × 40 rays over −52…+7°, 0.1–40 m and 2 cm range noise. The
+    old sensor fired 2048 × 64 rays at 60 Hz, pitched 15° down (2.4.0): ~40× a Mid-360. The blind
+    zone at touchdown is now 0.6 m all round, where it was 0.8 m ahead and 3.2 m behind.
+    - The LiDAR's own IMU (an ICM-40609-D) is a second `imu` sensor at the LiDAR's pose: 1 kHz,
+      with noise from the datasheet's densities scaled so its 200 Hz average has the datasheet's
+      noise, plus a small constant bias. `LIDAR_IMU_RATE` and `LIDAR_IMU_NOISE` (read by
+      `jinja_gen.py`, which now passes the environment to the template) change them.
+    - The base_link IMU is unchanged. RTF with the whole pipeline running: 0.95–1.00.
+  - **Hold and release (D3).** `sitl_singleagent.sh -H` spawns a hidden static model whose
+    DetachableJoint holds the robot where it spawns. FAST-LIO initializes while the robot hangs
+    still, and `lio_anchor` releases it on `/cf_0/release` (bridged). No FAST-LIO patch was needed.
+  - **`lidar_sim_adapter`.** It publishes the finite points outside the 0.3 m blind radius on
+    `/lidar/points` (the mapper's) and every 3rd of them on `/lio/points` (FAST-LIO's). It averages
+    the 1 kHz IMU to 200 Hz on `/lio/imu`, and optionally clips it at the real sensor's range.
+    - **Why it averages.** Gazebo samples an IMU instantaneously, a real one through an
+      anti-aliasing filter. At 200 Hz the mast-top IMU aliased the stance's rotation: on
+      2026-11-07 one stance's x velocity integrated 6.4 m/s wrong (−7.81 against −1.44 m/s), and
+      FAST-LIO ran 1.2 m away. With the 5 ms means, the error is 0.04 m/s RMS (max 0.30) over
+      122 stances.
+    - **Why every 3rd point.** It stands in for FAST-LIO's `point_filter_num` (the shipped Mid-360
+      config keeps every 3rd), which this fork's default handler ignores. With all 20 k points a
+      scan took up to 51 ms. FAST-LIO's 10-deep IMU queue (50 ms at 200 Hz, on the same thread)
+      can then drop a touchdown's samples: in one flat run the height jumped 1.1 m mid-hop. With
+      every 3rd point a scan takes ≤ 37 ms, at the same accuracy.
+  - **FAST-LIO (D2, D8).** `config/fast_lio_sim.yaml` runs the `~/fastlio_ws` overlay (commit
+    18418bc) with:
+    - the default handler (`lidar_type` 5), which keeps each point's time 0;
+    - `filter_size_surf`/`filter_size_map` 0.1. At 0.2, the height drifted 4 cm over the first
+      hops and stayed there.
+    - `acc_cov` 3.0. At FAST-LIO's 0.1, the horizontal speed after a fast touchdown lagged for
+      ~0.5 s (8–10 cm). At 0.01 it diverged.
+    - Replay of a low_wall bag: RMSE 4.0 → 1.5 cm. In the final runs FAST-LIO stayed within
+      1.3–3.1 cm RMSE in every world but the maze, where it drifted to 9.5 cm along the 14 m
+      corridor. Attitude stayed under 1° except one 0.4 s, 2° transient on lilypads. Clipping the
+      IMU at ±32 or ±16 g changed nothing, so Point-LIO was not needed.
+  - **`lio_anchor`.** It publishes the static `world → camera_init` from one pose during the hold:
+    T(world ← imu, Gazebo) · T(camera_init ← imu, FAST-LIO)⁻¹. It releases the robot and logs
+    FAST-LIO against Gazebo to `data/data_lio/` (`scripts/lio_report.py`). `gz_truth_tf` publishes
+    Gazebo's pose as TF for the mapper on Gazebo's pose (`pose_source:=gazebo`, stage 3a) and for
+    the anchor.
+  - **`lidar_elevation_mapper` (D7).** It keeps a Fankhauser-style height per cell: a higher hit
+    replaces, a lower one is ignored, the rest fuse. It also keeps an upper bound from the rays
+    that pass over each cell, and writes foot contacts as near-certain heights, with a 0.6 m start
+    disk at the first contact. It publishes `elevation`, `upper_bound`, `variance` and `hits` at
+    2 Hz, and scores itself against the known map (`data/data_elevation_map/`, `map_report.py`,
+    `plot_elevation_map.py`). The rules that came out of testing:
+    - A height counts once it has 2 hits and three rays have passed above it. A face whose top no
+      ray saw (a 3 m pole seen from 1.5 m) stays unbounded: an obstacle.
+    - A ray bounds only the cells whose centre it passes within 3 cm of: one that clips a corner
+      can miss a pad covering the rest.
+    - The bound is the third-lowest ray, and three rays must pass clearly below a height to remove
+      it. gpu_lidar returns mixed pixels at silhouettes, at the background's range (one 0.75 m past
+      a wall's face, one 27 cm under the floor).
+    - A ray that passes through a well-supported height (≥ 10 hits) is dropped from there on.
+    - No variance inflation on lower hits (`multi_height_noise` 0). At 1e-4 per hit, a wall's
+      thousands of face hits sank its top to the ground.
+    - Each cell's sigma has a 1 cm floor. Without it the fused variance collapsed, and a sloped
+      cell's spread counted as "a higher surface".
+    - Offline check on synthetic scans of all nine worlds (`ros2 run hopcopter_perception
+      mapper_check`): median ≤ 4 mm and p95 ≤ 13 mm away from edges, no bound below the terrain
+      that a neighbour does not cover. In the sim on FAST-LIO: median 0.4–0.7 cm and p95 1.5–1.8 cm
+      everywhere but the maze.
+  - **hopcopter publishes** each touchdown's foot on `/hopcopter/foot_contact` and each steering
+    apex's decision on `/hopcopter/apex_decision` (new `hopcopter_msgs/ApexDecision`).
 - **A `slanted_pads` world** (`elevation_map_publisher` scenario `slanted_pads`,
   `worlds/crazysim_slanted_pads.sdf`; no reference file).
   - **Layout.** The map is 19 × 6 m from (−2, −3). The start platform is the one from lilypads
@@ -248,6 +303,56 @@
     was later redesigned; see "Changed".)
 
 ### Changed
+- **The planner reads a LiDAR map's contract** (docs/lidar_mapping_plan.md, "The map contract").
+  A map with an `upper_bound` layer is a LiDAR map:
+  - an unseen cell with a bound is terrain at the bound for the clearance test and never a
+    landing (`Map2D5::set_landable`, which `standable_mask` ANDs in);
+  - an unseen, unbounded cell is OBSTACLE, as NaN always was;
+  - a hand-made map, without the layer, keeps every finite cell landable.
+  `ballistic_parity_test` is byte-identical, and the original 15 `ballistic_plan_check` cases are
+  identical; 5 new partial-map cases pass.
+  - **Landing margins on LiDAR maps.** A landing keeps 0.3 m (`standable.unseen_margin`) from
+    unseen cells, the body plus a typical miss. A 0.2 m wall whose shadow was bounded at the
+    wall's height read as a platform, and the robot came down on its front edge. Landings also keep
+    0.1 m further from steep edges (`standable.lidar_edge_margin`), since the mapper puts an edge
+    up to a cell outward. And a step counts as an edge 8 cm sooner (`standable.lidar_steep_noise`:
+    0.093 m per cell, ~43°), because the mapper spreads a step over two cells. The stairs' 0.18 m
+    risers read as 0.09 + 0.09, and a plan landed 5 cm past one. The costs:
+    - stairs (0.3 m treads) has no landable tread on the LiDAR map;
+    - the edge margin still leaves 0.05–0.15 m to a real edge. One maze run landed on the 0.3 m
+      wall and one cliff_gap run 0.15 m from the 1.8 m rim, and the robot fell at both. A margin
+      of 0.2 m prevents that but breaks lilypads' pit-unseen plan, so it is left open
+      (docs/lidar_mapping_plan.md, Status).
+  - **The start guard.** The planner refuses to plan from an unmeasured start. It used to plan
+    every hop from z = −1.0.
+  - **Frontier plans.** A goal not yet on measured, standable ground gets a plan to the reachable
+    cell nearest it (`frontier_candidates`: a 1.5 m-step flood over standable cells, ≥ 0.35 m from
+    unknown cells, nearest first, two tries).
+  - **Hold-and-replan.** On every map update the remaining hops are re-checked: landing still
+    standable, ground moved < 5 cm, every arc clearing by at least 0.15 m with its planned takeoff.
+    A replan is also triggered when a frontier plan can do better (the goal is now measured, or the
+    robot reached the frontier) or the robot holds. The planner then sends a DELETE alone, waits
+    for the robot to hop in place, and plans from there, at most every 5 s (backing off up to 30 s
+    after failures). Logged to `data/data_ballistic_planner/replans_*.csv`.
+  - **`clearance.active_tolerance` 0.05** (reference 0). Terrain constrains an arc only where it
+    is more than this above both endpoints. A LiDAR map's flat ground is a few mm rough, and at 0 a
+    3 mm bump next to a takeoff asked the full bottom clearance there: a 1.95 m apex for a 1.2 m
+    flat hop.
+  - **`clearance.start_exempt` 0.25 m** (reference 0). From a takeoff inside the clearance
+    inflation, the arc's first 0.25 m read the terrain itself. In the maze the robot landed 0.21 m
+    from a pole and no hop could leave. Takeoffs outside the inflation are unaffected.
+  - Snapshots carry the measured mask, and `visualize_planned_path.py` shades unseen cells and
+    marks frontier goals.
+- **hopcopter on a LiDAR map.**
+  - Its clearance re-check uses the planner's composed field (`composed_terrain`), with the same
+    tolerance and start exemption.
+  - The touchdown march falls through unseen cells to the floor. A takeoff ground on an unseen
+    cell is the last foot contact's, and `current_ground_z` is that contact (it was 0.0 forever).
+  - `elevation_map_callback` takes 0.6–0.9 ms per map on the control thread (logged every 20
+    maps).
+- `elevation_map_publisher`'s scenario maps moved to a header (`include/elevation_map_publisher/
+  scenarios.hpp`, shared with `ballistic_plan_check` and `mapper_check`), and it takes a `topic`
+  parameter.
 - **Bottom and side clearance are separate** (`ballistic_motion_planner` `robot_params()`,
   `hopcopter`'s clearance re-check). One `min_clearance` (0.3 m) used to be both the gap the arc
   keeps above the terrain and, with `robot_radius` (0.03 m), the sideways inflation of steep
@@ -469,6 +574,26 @@
   in both the ROS parameter default (`ballistic_planner_node.cpp`) and the `PlannerParams`
   struct default (`hopping_astar.hpp`); `parity_main.cpp` keeps 1.0 m to stay in lock-step with
   the Python reference. `validate_params` still passes (first-hop tan floor 0.833 < ceiling 1.0).
+
+### Fixed
+- **`clearance_apex` returned NaN, not inf, when an infinitely tall cell was under the arc**
+  (`JumpLib/takeoff_solver.py`). `need > apex` was then false, and the hop flew. That was the
+  maze's poles on a known map, and every unbounded unseen cell on a LiDAR map.
+- **The touchdown march no longer misses a pad landed on near its far rim**
+  (`JumpLib/touchdown.py`; `test_far_rim_of_a_pad`, `test_far_rim_onto_lower_ground`,
+  `test_falls_off_a_rim`). The march only stopped at a sample where the foot was at or below the
+  ground. A foot that reached a pad's top between two samples and passed its far rim before the
+  next was above the gap at that sample, so the pad was skipped. On the 2026-11-06 lilypads run
+  the foot landed 2 cm inside the far rim of the pad at (7.8, −0.5): 8 cm above the pad at the
+  x 8.10 sample, over the gap at x 8.30. The march went on to the gap floor (touchdown x 9.0,
+  2.75 m fall, 7.2 m/s arrival) while the robot landed at x 8.13. The takeoff was solved from the
+  gap floor, the push target (0.8 m above ground 0) sat below the pad, so the hop off it was
+  leg-only, landed on the near rim of the pad at (10.2, −0.6), and the robot flipped there. Now,
+  whenever the ground drops from one sample to the next, the closed form is also solved for the
+  previous sample's surface, and if the foot is still over it at that time, that is the touchdown.
+  The sample spacing `ds` is 0.05 m (was 0.2 m), half a map cell, so no cell is stepped over; at
+  ~20 lookups per fall the cost is negligible. Replaying that apex: CoM touchdown x 8.137 against
+  8.133 measured. The old march misses it at 0.05 m too; the rim check is the fix.
 
 ### Removed
 - `hopcopter`: `JumpingHeightController` and its calls (`estimate_height`, `update_apex_state`,

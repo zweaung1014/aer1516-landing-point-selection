@@ -24,6 +24,9 @@ data/**/*.csv
 # Planned-path snapshots + rendered figures (ballistic_planner_node)
 data/**/vis_planned_path/*.json
 data/**/vis_planned_path/*.png
+# LiDAR map snapshots + rendered figures (lidar_elevation_mapper, plot_elevation_map.py)
+data/data_elevation_map/*.json
+data/data_elevation_map/*.png
 
 .vscode/*
 

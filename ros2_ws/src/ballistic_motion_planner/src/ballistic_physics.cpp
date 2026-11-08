@@ -274,10 +274,21 @@ Stance stance(const Vec3 & v_in, const Vec3 & d_out, double k2)
   return out;
 }
 
+namespace
+{
+// A cell's own terrain for the clearance test: OBSTACLE is infinitely tall.
+double terrain(const Map2D5 & map, int r, int c)
+{
+  const double z = map.at(r, c);
+  return z == Map2D5::OBSTACLE ? std::numeric_limits<double>::infinity() : z;
+}
+}  // namespace
+
 std::optional<ArcSamples> arc_samples(
   double x_s, double y_s, double t_s,
   double x_g, double y_g, double t_g,
-  const Map2D5 & map, const std::vector<double> & inflated, double max_step)
+  const Map2D5 & map, const std::vector<double> & inflated, double max_step,
+  double active_tol, double start_exempt)
 {
   const double dx = x_g - x_s;
   const double dy = y_g - y_s;
@@ -311,9 +322,10 @@ std::optional<ArcSamples> arc_samples(
     int ri = static_cast<int>(std::trunc((cy - map.origin_y()) / res));
     ci = std::max(0, std::min(ci, map.cols() - 1));
     ri = std::max(0, std::min(ri, map.rows() - 1));
-    out.field[i] = inflated[static_cast<size_t>(ri) * map.cols() + ci];
+    out.field[i] = u <= start_exempt ? terrain(map, ri, ci) :
+      inflated[static_cast<size_t>(ri) * map.cols() + ci];
     // Only terrain above BOTH endpoints can reject the hop.
-    if (i != 0 && i != n - 1 && out.field[i] > t_max) {
+    if (i != 0 && i != n - 1 && out.field[i] > t_max + active_tol) {
       out.active[i] = 1;
       out.any_active = true;
     }
@@ -325,7 +337,7 @@ std::optional<double> clearance_floor_alpha(
   double x_s, double y_s, double t_s,
   double x_g, double y_g, double t_g,
   const Map2D5 & map, const std::vector<double> & inflated,
-  double gate, double max_step)
+  double gate, double max_step, double active_tol, double start_exempt)
 {
   // arc_samples' walk, with the same arithmetic, but without storing the
   // samples: this runs for every candidate edge, millions of times per plan.
@@ -354,9 +366,10 @@ std::optional<double> clearance_floor_alpha(
     int ri = static_cast<int>(std::trunc((cy - map.origin_y()) / res));
     ci = std::max(0, std::min(ci, map.cols() - 1));
     ri = std::max(0, std::min(ri, map.rows() - 1));
-    const double field = inflated[static_cast<size_t>(ri) * map.cols() + ci];
+    const double field = u <= start_exempt ? terrain(map, ri, ci) :
+      inflated[static_cast<size_t>(ri) * map.cols() + ci];
     // Only terrain above BOTH endpoints can reject the hop.
-    if (i != 0 && i != n - 1 && field > t_max) {
+    if (i != 0 && i != n - 1 && field > t_max + active_tol) {
       any_active = true;
       const double numer = field + gate - t_s - Z * (u * u) / (X * X);
       const double denom = u * (X - u) / X;

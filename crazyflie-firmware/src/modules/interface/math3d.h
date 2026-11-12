@@ -740,8 +740,10 @@ static inline struct vec qvrot(struct quat q, struct vec v) {
 		vscl(2.0f * q.w, vcross(qv, v))
 	);
 }
-// multiply (compose) two quaternions
-// such that qvrot(qqmul(q, p), v) == qvrot(q, qvrot(p, v)).
+// multiply (compose) two quaternions. NOTE: this returns the Hamilton product p * q (rotate by q
+// first, then by p): qvrot(qqmul(q, p), v) == qvrot(p, qvrot(q, v)). The comment here used to say
+// the reverse, which is how mm_pose.c came to compute a world-frame residual (see there). Upstream
+// later made this q * p (a7becf0); this copy keeps the old behavior that its callers rely on.
 static inline struct quat qqmul(struct quat q, struct quat p) {
 	float x =  q.w*p.x + q.z*p.y - q.y*p.z + q.x*p.w;
 	float y = -q.z*p.x + q.w*p.y + q.x*p.z + q.y*p.w;

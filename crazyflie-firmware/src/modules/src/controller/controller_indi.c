@@ -225,11 +225,11 @@ void controllerINDI(control_t *control, const setpoint_t *setpoint,
 		// behavior if level mode is engaged later
 		if (setpoint->mode.roll == modeVelocity) {
 			rateDesired.roll = radians(setpoint->attitudeRate.roll);
-			attitudeControllerResetRollAttitudePID();
+			attitudeControllerResetRollAttitudePID(0);  // as before the reset took an argument
 		}
 		if (setpoint->mode.pitch == modeVelocity) {
 			rateDesired.pitch = radians(setpoint->attitudeRate.pitch);
-			attitudeControllerResetPitchAttitudePID();
+			attitudeControllerResetPitchAttitudePID(0);
 		}
 
 		/*
@@ -317,7 +317,7 @@ void controllerINDI(control_t *control, const setpoint_t *setpoint,
 		float_rates_zero(&indi.u_in);
 
 		if(indi.thrust == 0){
-			attitudeControllerResetAllPID();
+			attitudeControllerResetAllPID(0, 0, 0);  // unchanged INDI behavior
 			positionControllerResetAllPID();
 
 			// Reset the calculated YAW angle for rate control

@@ -113,11 +113,11 @@ void controllerPid(control_t *control, const setpoint_t *setpoint,
     // behavior if level mode is engaged later
     if (setpoint->mode.roll == modeVelocity) {
       rateDesired.roll = setpoint->attitudeRate.roll;
-      attitudeControllerResetRollAttitudePID();
+      attitudeControllerResetRollAttitudePID(state->attitude.roll);
     }
     if (setpoint->mode.pitch == modeVelocity) {
       rateDesired.pitch = setpoint->attitudeRate.pitch;
-      attitudeControllerResetPitchAttitudePID();
+      attitudeControllerResetPitchAttitudePID(state->attitude.pitch);
     }
 
     // TODO: Investigate possibility to subtract gyro drift.
@@ -154,7 +154,9 @@ void controllerPid(control_t *control, const setpoint_t *setpoint,
     cmd_pitch = control->pitch;
     cmd_yaw = control->yaw;
 
-    attitudeControllerResetAllPID();
+    // From the current attitude: reset to 0, the yaw PID's D term read the whole yaw angle as a
+    // one-tick step at the next update (-0.35 * 500 * yaw deg/s), saturating the yaw output
+    attitudeControllerResetAllPID(state->attitude.roll, state->attitude.pitch, state->attitude.yaw);
     positionControllerResetAllPID();
 
     // Reset the calculated YAW angle for rate control

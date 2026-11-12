@@ -80,11 +80,12 @@ until **Play** is pressed in the Gazebo GUI. A goal then goes in either by publi
 
 There is **no test suite for the simulation**. The `test/` directories in the Python packages
 contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
-`test_waypoint_tracker.py`, `test_push_controller.py`, `test_takeoff_solver.py` and `test_touchdown.py`. Run them with
-`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py test/test_takeoff_solver.py test/test_touchdown.py`.
+`test_waypoint_tracker.py`, `test_push_controller.py`, `test_takeoff_solver.py`, `test_touchdown.py` and `test_heading.py`. Run them with
+`cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py test/test_takeoff_solver.py test/test_touchdown.py test/test_heading.py`.
 They cover waypoint decisions, the braking tilt guard, the push cutoff, and the takeoff solve
 (each solved hop lands on its target, also under an independent step integration; the guards; the
-clearance re-check, also on a LiDAR map's composed field and with its edge allowance), 88 tests in all. The planner has two
+clearance re-check, also on a LiDAR map's composed field and with its edge allowance), and the
+heading helpers (docs/yawfix_report.md), 179 tests in all. The planner has two
 offline executables (no ROS graph): `ros2 run ballistic_motion_planner ballistic_parity_test`
 (the reference search against the Python port; its output must stay byte-identical) and
 `ballistic_plan_check` (the momentum-aware search on 15 cases: landing tilts, the expected plans,
@@ -308,7 +309,15 @@ and controller work in the world frame) but is kept for RViz and legacy consumer
   fall then overshot its landing attitude by 1–1.5°, which put continuing hops 0.1–0.3 m short.
 - **Pitch signs in the per-tick CSV.** `act_pitch_deg` is the negative of the convention of
   `des_pitch_deg` and of hopcopter's commands: a body tracking its command logs
-  `act_pitch_deg ≈ -des_pitch_deg`. Roll has one convention.
+  `act_pitch_deg ≈ -des_pitch_deg`. Roll has one convention. Since the yaw fix, `act_*`/`cf_*` are
+  intrinsic ZYX angles (the firmware's); older logs hold scipy's extrinsic `'zyx'`, the same to
+  second order at heading 0 only.
+- **Yaw (docs/yawfix_report.md).** The SITL firmware's Kalman pose update (`mm_pose.c`) is patched
+  to the body-frame residual: with the vendored order, roll/pitch corrections from the Gazebo pose
+  were rotated by the heading and inverted past ±90°, which flipped the robot whenever it yawed.
+  hopcopter turns to face each hop's target (`face_waypoint`), only while the push is on
+  (`yaw_gate`), and converts the world-frame landing axis to roll/pitch every tick at the current
+  heading. Do not command yaw during tilted falls at idle thrust: a motor below PWM 1000 stops.
 - **Two parameter sets in the planner.** The node's defaults (`robot_params()`: mass 0.3609,
   η 0.77, 4 J/kg, robot_radius 0.15, bottom_clearance 0.2, side_clearance 0.03, momentum-aware)
   are not `PlannerParams`' defaults (the reference planner's, for `ballistic_parity_test`, where

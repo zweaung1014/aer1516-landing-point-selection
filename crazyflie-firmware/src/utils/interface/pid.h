@@ -86,10 +86,12 @@ void pidSetIntegralLimit(PidObject* pid, const float limit);
 /**
  * Reset the PID error values
  *
- * @param[in] pid   A pointer to the pid object.
- * @param[in] limit Pid integral swing limit.
+ * @param[in] pid    A pointer to the pid object.
+ * @param[in] actual The current measurement. The D term differentiates the measurement, so the
+ *                   first update after a reset sees (measured - actual) / dt: with 0 here, a yaw of
+ *                   90 deg read as a 45000 deg/s step (upstream backport).
  */
-void pidReset(PidObject* pid);
+void pidReset(PidObject* pid, const float actual);
 
 /**
  * Update the PID parameters.

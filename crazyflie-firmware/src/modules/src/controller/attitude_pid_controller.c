@@ -173,27 +173,34 @@ void attitudeControllerCorrectAttitudePID(
   else if (yawError < -180.0f)
     yawError += 360.0f;
   pidSetError(&pidYaw, yawError);
+  // The D term differentiates the measured yaw: keep it continuous across the +-180 deg wrap, or a
+  // crossing reads as a 360 deg step in one tick (180000 deg/s; upstream wraps it in pidUpdate)
+  float yawDelta = eulerYawActual - pidYaw.prevMeasured;
+  if (yawDelta > 180.0f)
+    pidYaw.prevMeasured += 360.0f;
+  else if (yawDelta < -180.0f)
+    pidYaw.prevMeasured -= 360.0f;
   *yawRateDesired = pidUpdate(&pidYaw, eulerYawActual, false);
 }
 
-void attitudeControllerResetRollAttitudePID(void)
+void attitudeControllerResetRollAttitudePID(float rollActual)
 {
-    pidReset(&pidRoll);
+    pidReset(&pidRoll, rollActual);
 }
 
-void attitudeControllerResetPitchAttitudePID(void)
+void attitudeControllerResetPitchAttitudePID(float pitchActual)
 {
-    pidReset(&pidPitch);
+    pidReset(&pidPitch, pitchActual);
 }
 
-void attitudeControllerResetAllPID(void)
+void attitudeControllerResetAllPID(float rollActual, float pitchActual, float yawActual)
 {
-  pidReset(&pidRoll);
-  pidReset(&pidPitch);
-  pidReset(&pidYaw);
-  pidReset(&pidRollRate);
-  pidReset(&pidPitchRate);
-  pidReset(&pidYawRate);
+  pidReset(&pidRoll, rollActual);
+  pidReset(&pidPitch, pitchActual);
+  pidReset(&pidYaw, yawActual);
+  pidReset(&pidRollRate, 0);
+  pidReset(&pidPitchRate, 0);
+  pidReset(&pidYawRate, 0);
 }
 
 void attitudeControllerGetActuatorOutput(int16_t* roll, int16_t* pitch, int16_t* yaw)

@@ -46,6 +46,7 @@ from hopping_robot.JumpLib.push_controller import PushController, push_accel
 from hopping_robot.JumpLib.takeoff_solver import (HopModel, clearance_apex, composed_terrain, dilate,
                                                   tilt_of, unit)
 from hopping_robot.JumpLib.touchdown import march_touchdown
+from hopping_robot.JumpLib.heading import face_heading, heading_of, tilt_rp, wrap_pi, yaw_rate_cmd
 
 uri = uri_helper.uri_from_env(default='udp://0.0.0.0:19850') # radio://0/80/2M/E7E7E7E7E7
 
@@ -238,7 +239,43 @@ class hopcopter(Node):
         # at runtime: ros2 param set /hopcopter desired_rel_z 1.0
         self.desired_rel_z = self.declare_parameter('desired_rel_z', 0.8).value
         self.desired_z = self.desired_rel_z
-        self.desired_yaw = 0.0
+        # Heading. With face_waypoint the robot turns to face each hop's target: the steering apex
+        # that decides a hop sets the heading toward it (hops shorter than face_min_dist keep the
+        # current one). Without it, it holds desired_yaw_deg (world frame; switching face_waypoint
+        # off returns to it). All settable at runtime:
+        #   ros2 param set /hopcopter face_waypoint false
+        #   ros2 param set /hopcopter desired_yaw_deg 90.0
+        self.face_waypoint = self.declare_parameter('face_waypoint', True).value
+        self.face_min_dist = 0.5
+        self.desired_yaw = wrap_pi(math.radians(
+            self.declare_parameter('desired_yaw_deg', 0.0).value))
+        # The yaw rate command: yaw_kp [deg/s per rad of heading error], capped at yaw_rate_max
+        # [deg/s]. The firmware integrates it into its yaw setpoint (the legacy commander's yaw
+        # is a rate).
+        self.yaw_kp = self.declare_parameter('yaw_kp', 90.0).value
+        self.yaw_rate_max = self.declare_parameter('yaw_rate_max', 60.0).value
+        # When yaw may be commanded (otherwise the rate command is 0 and the firmware holds its
+        # heading): 'push' (default: only while the push is on), 'climb' (from liftoff to the apex,
+        # the coast's cap falling to 0 at the apex) or 'always'. Gated, a fall that lands level (a
+        # hop in place) may still turn. At idle thrust a motor commanded below PWM 1000 stops
+        # (CrazySim's PWM2OMEGA), so any yaw torque there comes from switching a diagonal pair off,
+        # which takes the roll/pitch authority a tilted landing needs: with 'always', turning
+        # 156 deg landed that hop 0.8 m long (0.03 m with 'push'). The push has the thrust to turn;
+        # the level coast after it settles the turn, so a tilted fall does not start with a spin to
+        # stop. ('climb' turns faster but reached apexes still spinning at ~45 deg/s, and stopping
+        # that in a tilted fall tipped the robot over on the stairs.)
+        self.yaw_gate = self.declare_parameter('yaw_gate', 'push').value
+        self.yaw_level_tilt = math.radians(3.0)
+        # 'climb': the yaw deceleration [deg/s^2] the coast's cap assumes (idle thrust)
+        self.yaw_brake_accel = 200.0
+        for name in ('yaw_kp', 'yaw_rate_max', 'yaw_gate'):
+            err = self._yaw_param_error(name, self.get_parameter(name).value)
+            if err:
+                raise ValueError(err)
+        # The landing axis (world frame) commanded at the latest apex. It is turned into roll and
+        # pitch every tick, at the current heading: the firmware's roll and pitch are relative to
+        # the heading, so angles fixed at the apex would swing the landing tilt around with a turn.
+        self._z_land_cmd = np.array([0.0, 0.0, 1.0])
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
         # Ground elevation lookup from /elevation_map (_ground_elevation_at): the touchdown march,
@@ -411,6 +448,9 @@ class hopcopter(Node):
             # the firmware's own estimate (/cf_1/pose), same angle conventions as act_*
             'cf_pose_stamp', 'cf_x', 'cf_y', 'cf_z',
             'cf_roll_deg', 'cf_pitch_deg', 'cf_yaw_deg',
+            # the yaw rate sent [deg/s, counterclockwise positive]; 0 where yaw_gate holds the
+            # heading
+            'yaw_rate_cmd',
         ])
         self._att_rows = 0
         self.get_logger().info(f'Attitude-tracking CSV: {att_csv_filename}')
@@ -440,7 +480,8 @@ class hopcopter(Node):
             # needs, and the one commanded after the tilt guard (heading, elevation)
             'solve', 'alpha_leg_deg', 'v_leg', 'v_h_leg', 'apex_raise',
             'takeoff_heading_deg', 'takeoff_elev_deg',
-            # the landing attitude commanded for it, and the tilt the unguarded takeoff needed
+            # the landing attitude commanded for it (roll/pitch at this apex's heading; the
+            # per-tick commands follow the heading), and the tilt the unguarded takeoff needed
             'cmd_roll_deg', 'cmd_pitch_deg', 'cmd_tilt_deg', 'tilt_needed_deg', 'tilt_capped',
             'theta_v_deg', 'cmd_axis_x', 'cmd_axis_y', 'cmd_axis_z',
             # what the model expects of the commanded hop: push, climb and fall times, the push's
@@ -459,6 +500,8 @@ class hopcopter(Node):
             # this fall's touchdown march (JumpLib/touchdown.py): 'top' or 'edge' (meets a surface
             # from its side), the ground height there, and the ground lookups it made
             'td_kind', 'td_ground', 'td_steps',
+            # the heading at this apex (Gazebo) and the one commanded from it on (face_waypoint)
+            'heading_deg', 'heading_cmd_deg',
         ])
         self.get_logger().info(f'Apex-decision CSV: {dec_csv_filename}')
 
@@ -738,7 +781,33 @@ class hopcopter(Node):
                     return SetParametersResult(successful=False, reason='desired_rel_z must be > 0')
                 self.desired_rel_z = p.value
                 self.get_logger().info(f'desired_rel_z set to {p.value:.3f} m')
+            elif p.name == 'desired_yaw_deg':
+                self.desired_yaw = wrap_pi(math.radians(p.value))
+                self.get_logger().info(f'desired_yaw_deg set to {p.value:.1f} deg')
+            elif p.name in ('yaw_kp', 'yaw_rate_max', 'yaw_gate'):
+                err = self._yaw_param_error(p.name, p.value)
+                if err:
+                    return SetParametersResult(successful=False, reason=err)
+                setattr(self, p.name, p.value)
+                self.get_logger().info(f'{p.name} set to {p.value}')
+            elif p.name == 'face_waypoint':
+                self.face_waypoint = bool(p.value)
+                if not self.face_waypoint:
+                    self.desired_yaw = wrap_pi(math.radians(
+                        self.get_parameter('desired_yaw_deg').value))
+                self.get_logger().info(f'face_waypoint set to {self.face_waypoint}')
         return SetParametersResult(successful=True)
+
+    @staticmethod
+    def _yaw_param_error(name, value):
+        """Why a yaw parameter value is invalid, or None."""
+        if name == 'yaw_kp' and value < 0.0:
+            return 'yaw_kp must be >= 0'
+        if name == 'yaw_rate_max' and value <= 0.0:
+            return 'yaw_rate_max must be > 0'
+        if name == 'yaw_gate' and value not in ('always', 'climb', 'push'):
+            return "yaw_gate must be 'always', 'climb' or 'push'"
+        return None
 
     def _world_velocity(self):
         """The odom twist rotated into the world frame (stage 0: it is body frame)."""
@@ -870,12 +939,15 @@ class hopcopter(Node):
                 f"Hop to ({d.aim_x:.2f}, {d.aim_y:.2f}): {hop['solve']}"
                 + (f", apex raised {hop['raised']:.2f} for clearance" if hop['raised'] > 0.0 else "")
                 + (f", hopping in place to {hop['apex']:.2f}" if hop['solve'] in ('pump', 'blocked') else ""))
-        # Command the landing attitude that turns the arrival into the commanded leg takeoff, as
-        # roll and pitch in the yaw frame (LinearJumpingController.inverse_jumping_model's convention)
-        v_b = Rotation.from_rotvec(yaw * np.array([0.0, 0.0, -1.0])).apply(hop['z_land'])
-        roll = -math.asin(self.saturation(v_b[1], 1.0, -1.0))
-        self.LJC.roll = math.degrees(roll)
-        self.LJC.pitch = math.degrees(math.asin(self.saturation(v_b[0] / math.cos(roll), 1.0, -1.0)))
+        # Command the landing attitude that turns the arrival into the commanded leg takeoff. It is
+        # kept as the world-frame axis and turned into roll and pitch every tick (tilt_rp, at the
+        # current heading); the angles at this apex's heading are logged.
+        self._z_land_cmd = hop['z_land']
+        self.LJC.roll, self.LJC.pitch = tilt_rp(hop['z_land'], yaw)
+        # Face the target of a hop that moves (not one in place, nor a small correction)
+        if self.face_waypoint:
+            self.desired_yaw = face_heading(d.mode, foot, (d.aim_x, d.aim_y), self.desired_yaw,
+                                            self.face_min_dist)
         self.desired_x, self.desired_y = d.aim_x, d.aim_y
         hop.update({'decided': decided, 'land_before': land_before, 'foot': foot, 'fall_h': fall_h,
                     'fall_t': fall_t, 'v_in': v_in})
@@ -982,8 +1054,29 @@ class hopcopter(Node):
             *push,
             *(['', '', ''] if self._last_td is None else
               [self._last_td.kind, f4(self._last_td.ground), self._last_td.steps]),
+            f'{math.degrees(self._heading()):.3f}', f'{math.degrees(self.desired_yaw):.3f}',
         ])
         self.dec_csv_file.flush()
+
+    def _yaw_rate_cap(self, state, push_active):
+        """The largest yaw rate [deg/s] yaw_gate lets the robot turn at in this jumping state:
+        yaw_rate_max in 'always', while the push is on, and in a fall that lands level; in the
+        coast after the push ('climb' only) a cap that falls to 0 at the apex, so a tilted fall
+        does not start with a spin to stop at idle thrust; else 0."""
+        if self.yaw_gate == 'always' or push_active:
+            return self.yaw_rate_max
+        if state == 3 and self.yaw_gate == 'climb':
+            t_apex = max(0.0, self.dvel_z) / self.G_flight_time_mocap
+            return min(self.yaw_rate_max, self.yaw_brake_accel * t_apex)
+        if state == 1 and tilt_of(self._z_land_cmd) < self.yaw_level_tilt:
+            return self.yaw_rate_max
+        return 0.0
+
+    def _heading(self):
+        """The body's heading [rad] (Gazebo): the intrinsic ZYX yaw atan2(R10, R00), under which
+        the firmware takes its roll and pitch. (scipy's extrinsic as_euler('zyx'), used before the
+        yaw fix, drifts from it when the body tilts both ways: -3.5 deg at 14/14 deg.)"""
+        return heading_of(self.ori_x, self.ori_y, self.ori_z, self.ori_w)
 
     def saturation(self, x, max_x, min_x):
         if x > max_x:
@@ -1015,7 +1108,6 @@ class hopcopter(Node):
         # Until a path arrives, hop in place where the robot starts
         if self.desired_x is None:  # First time initialization
             self.desired_x, self.desired_y = self.pos_x, self.pos_y
-            self.desired_yaw = 0.0
             self.tracker.hold_xy = (self.pos_x, self.pos_y)
 
         # A DELETE with no new path after it: drop the path and hop in place
@@ -1044,11 +1136,13 @@ class hopcopter(Node):
 
         # Firmware data, converting quat to euler
         quat = [self.current_ori.x, self.current_ori.y, self.current_ori.z, self.current_ori.w]
-        robot_euler = Rotation.from_quat(quat).as_euler('zyx', degrees=False) # in radians
+        # Intrinsic ZYX (yaw, pitch, roll): the firmware's convention, the frame of des_roll/pitch.
+        # (Extrinsic 'zyx' was logged before the yaw fix: the same to second order at heading 0.)
+        robot_euler = Rotation.from_quat(quat).as_euler('ZYX', degrees=False) # in radians
 
         # Gazebo ground truth data, converting quat to euler
         gzgt_quat = [self.ori_x, self.ori_y, self.ori_z, self.ori_w]
-        gzgt_robot_euler = Rotation.from_quat(gzgt_quat).as_euler('zyx', degrees=False) # in radians
+        gzgt_robot_euler = Rotation.from_quat(gzgt_quat).as_euler('ZYX', degrees=False)  # [rad]
 
         ## Filter and differentiator
         X_f = self.Filter_x.filter(self.pos_x) # was self.current_pos.x
@@ -1071,7 +1165,7 @@ class hopcopter(Node):
         u_x = PID_x_flight.update_error(X_f, self.Diff_X.data_rate, Abs_time)
         u_y = PID_y_flight.update_error(Y_f, self.Diff_Y.data_rate, Abs_time)
         u_z = PID_z_flight.update_error(Z_f, self.Diff_Z.data_rate, Abs_time)
-        angle_yaw = gzgt_robot_euler[0]
+        angle_yaw = self._heading()
 
         ## Define the commands
         pitch_flight = (u_x * math.cos(angle_yaw) + u_y * math.sin(angle_yaw))
@@ -1080,12 +1174,8 @@ class hopcopter(Node):
         pitch_flight = self.saturation(pitch_flight, 25, -25) + pitch_bias_flight
         roll_flight = self.saturation(roll_flight, 25, -25) + roll_bias_flight
         thrust_flight = round(self.saturation(u_z, 60000, 10000)) # CFLIB thrust scaled between 10K to 60K
-        Yaw_error = self.desired_yaw - angle_yaw
-        if Yaw_error > math.pi:
-            Yaw_error = Yaw_error - 2 * math.pi
-        elif Yaw_error < -math.pi:
-            Yaw_error = Yaw_error + 2 * math.pi
-        yaw_flight = - Yaw_error * 30
+        # The yaw rate toward the heading setpoint, negated for the legacy commander
+        yaw_flight = -yaw_rate_cmd(self.desired_yaw, angle_yaw, self.yaw_kp, self.yaw_rate_max)
 
         # jummping controller
         if not self.flight_enable and self.controller_start_flag:
@@ -1135,7 +1225,7 @@ class hopcopter(Node):
                 )
                 euler = Rotation.from_quat(
                     [self.ori_x, self.ori_y, self.ori_z, self.ori_w]
-                ).as_euler('zyx', degrees=True)  # [yaw, pitch, roll]
+                ).as_euler('ZYX', degrees=True)  # [yaw, pitch, roll], intrinsic
                 self.csv_writer.writerow([
                     f'{time.time():.6f}',
                     self.jumping_counter,
@@ -1193,7 +1283,7 @@ class hopcopter(Node):
                 if self.steering_enabled:
                     # Decide what the next hop aims at from where this flight lands, solve its
                     # takeoff, and command the landing attitude that launches it
-                    _, hop = self._decide_and_steer(Z_f, v_world, gzgt_robot_euler[0], Abs_time)
+                    _, hop = self._decide_and_steer(Z_f, v_world, angle_yaw, Abs_time)
                     target_apex, ground = hop['apex'], hop['ground']
                     fall = (hop['fall_h'], hop['fall_t'], hop['v_in'])
                 else:
@@ -1202,6 +1292,7 @@ class hopcopter(Node):
                     _, fall_h, fall_t, v_in, ground = self._predict_touchdown(
                         Z_f, v_world, np.array([0.0, 0.0, 1.0]), Abs_time)
                     fall = (fall_h, fall_t, v_in)
+                    self._z_land_cmd = np.array([0.0, 0.0, 1.0])
                     self.LJC.roll = 0.0
                     self.LJC.pitch = 0.0
                     target_apex = self.desired_rel_z
@@ -1233,7 +1324,9 @@ class hopcopter(Node):
             else:
                 if self.JSTO.jumping_state == 1:
                     self.condition_log.append("1")
-                    roll_flight, pitch_flight, self.desired_yaw, thrust_flight = self.LJC.roll, self.LJC.pitch, self.desired_yaw, 1000 #- power_falling_thrust  # unpowered falling
+                    # The landing attitude at the current heading (the apex's while it holds)
+                    roll_flight, pitch_flight = tilt_rp(self._z_land_cmd, angle_yaw)
+                    thrust_flight = 1000  # unpowered falling
                     if self._reset_attitude_pid:
                         thrust_flight = 0     # resets the firmware's attitude PIDs (see __init__)
                         self._reset_attitude_pid = False
@@ -1254,6 +1347,9 @@ class hopcopter(Node):
                     self.condition_log.append("ready_to_drop")
                     roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, self.desired_yaw,  1000
                     push_active = False
+                # Turn only in the phases yaw_gate allows, and no faster (see __init__)
+                cap = self._yaw_rate_cap(self.JSTO.jumping_state, push_active)
+                yaw_flight = -yaw_rate_cmd(self.desired_yaw, angle_yaw, self.yaw_kp, cap)
         else:
             self.condition_log.append("false")
             roll_flight, pitch_flight, self.desired_yaw, thrust_flight = 0, 0, 0, 0
@@ -1275,6 +1371,7 @@ class hopcopter(Node):
             f'{self.current_pos.x:.6f}', f'{self.current_pos.y:.6f}', f'{self.current_pos.z:.6f}',
             f'{math.degrees(robot_euler[2]):.4f}', f'{-math.degrees(robot_euler[1]):.4f}',
             f'{math.degrees(robot_euler[0]):.4f}',
+            f'{-yaw_flight:.2f}',
         ])
         self._att_rows += 1
         if self._att_rows % 100 == 0:

@@ -268,12 +268,12 @@ void velocityController(float* thrust, attitude_t *attitude, const Axis3f* setpo
 
 void positionControllerResetAllPID()
 {
-  pidReset(&this.pidX.pid);
-  pidReset(&this.pidY.pid);
-  pidReset(&this.pidZ.pid);
-  pidReset(&this.pidVX.pid);
-  pidReset(&this.pidVY.pid);
-  pidReset(&this.pidVZ.pid);
+  pidReset(&this.pidX.pid, 0);
+  pidReset(&this.pidY.pid, 0);
+  pidReset(&this.pidZ.pid, 0);
+  pidReset(&this.pidVX.pid, 0);
+  pidReset(&this.pidVY.pid, 0);
+  pidReset(&this.pidVZ.pid, 0);
 }
 
 void positionControllerResetAllfilters() {

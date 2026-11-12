@@ -118,7 +118,9 @@ def stats(values, fmt="{:.3f}"):
 
 
 def rot_zyx(yaw, pitch, roll):
-    """Body-to-world rotation for scipy's as_euler('zyx') angles [rad]."""
+    """Body-to-world rotation Rz(yaw) Ry(pitch) Rx(roll) [rad]: intrinsic ZYX, the convention of
+    hopcopter's logged act_*/cf_* angles since the yaw fix. (Older logs hold scipy's extrinsic
+    as_euler('zyx') angles, which agree with it to second order while the heading is near 0.)"""
     cy, sy = np.cos(yaw), np.sin(yaw)
     cp, sp = np.cos(pitch), np.sin(pitch)
     cr, sr = np.cos(roll), np.sin(roll)

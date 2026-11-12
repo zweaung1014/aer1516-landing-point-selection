@@ -126,10 +126,10 @@ void pidSetIntegralLimit(PidObject* pid, const float limit) {
     pid->iLimit = limit;
 }
 
-void pidReset(PidObject* pid)
+void pidReset(PidObject* pid, const float actual)
 {
   pid->error        = 0;
-  pid->prevMeasured = 0;
+  pid->prevMeasured = actual;
   pid->integ        = 0;
   pid->deriv        = 0;
 }

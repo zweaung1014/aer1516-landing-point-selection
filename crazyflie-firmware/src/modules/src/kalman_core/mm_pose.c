@@ -40,7 +40,13 @@ void kalmanCoreUpdateWithPose(kalmanCoreData_t* this, poseMeasurement_t *pose)
   // compute orientation error
   struct quat const q_ekf = mkquat(this->q[1], this->q[2], this->q[3], this->q[0]);
   struct quat const q_measured = mkquat(pose->quat.x, pose->quat.y, pose->quat.z, pose->quat.w);
-  struct quat const q_residual = qqmul(qinv(q_ekf), q_measured);
+  // Body-frame residual q_ekf^-1 * q_measured (Hamilton product): kalmanCoreFinalize() folds the
+  // error state back in as q_ekf * dq. This math3d.h's qqmul(q, p) returns the Hamilton product
+  // p * q, so the operands go in reverse order (upstream fix c21368d2, Sep 2025). The other order is
+  // the world-frame residual, which rotates the roll/pitch corrections by the yaw: right at yaw 0
+  // when level (tilted, it also leaked part of a pitch error into yaw), none at +-90 deg and
+  // inverted beyond, where the estimate diverges and the robot flips.
+  struct quat const q_residual = qqmul(q_measured, qinv(q_ekf));
   // small angle approximation, see eq. 141 in http://mars.cs.umn.edu/tr/reports/Trawny05b.pdf
   struct vec const err_quat = vscl(2.0f / q_residual.w, quatimagpart(q_residual));
 

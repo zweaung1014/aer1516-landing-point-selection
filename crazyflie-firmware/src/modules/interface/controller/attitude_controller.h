@@ -54,19 +54,20 @@ void attitudeControllerCorrectRatePID(
        float rollRateDesired, float pitchRateDesired, float yawRateDesired);
 
 /**
- * Reset controller roll attitude PID
+ * Reset controller roll attitude PID (rollActual: the current roll, deg)
  */
-void attitudeControllerResetRollAttitudePID(void);
+void attitudeControllerResetRollAttitudePID(float rollActual);
 
 /**
- * Reset controller pitch attitude PID
+ * Reset controller pitch attitude PID (pitchActual: the current pitch, deg)
  */
-void attitudeControllerResetPitchAttitudePID(void);
+void attitudeControllerResetPitchAttitudePID(float pitchActual);
 
 /**
- * Reset controller roll, pitch and yaw PID's.
+ * Reset controller roll, pitch and yaw PID's. The attitude PIDs start from the current attitude
+ * (deg), so their D terms (on the measurement) see no step at the first update after the reset.
  */
-void attitudeControllerResetAllPID(void);
+void attitudeControllerResetAllPID(float rollActual, float pitchActual, float yawActual);
 
 /**
  * Get the actuator output.

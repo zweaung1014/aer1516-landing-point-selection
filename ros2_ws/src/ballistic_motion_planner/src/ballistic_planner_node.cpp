@@ -129,21 +129,23 @@ public:
     frontier_.hop_radius = declare_parameter("frontier.hop_radius", frontier_.hop_radius);
     frontier_.max_rise = declare_parameter("frontier.max_rise", frontier_.max_rise);
     frontier_attempts_ = static_cast<int>(declare_parameter("frontier.max_attempts", int64_t{2}));
-    // LiDAR maps put edges up to a cell outward: land at least this much further from them.
-    // 0.1 leaves 0.05-0.15 m to the real edge: plans then landed on the maze's 0.3 m wall and
-    // 0.15 m from cliff_gap's 1.8 m rim, and the robot fell at both (2026-11-07). 0.2 prevents
-    // that, but leaves lilypads' smallest pads only their centre cell, and the pit-unseen plan
-    // fails. Open: see docs/lidar_mapping_plan.md, Status.
+    // On a LiDAR map, land this much further from edges that drop at least
+    // standable.lidar_edge_min_drop: a rim seen from above can read a cell wider than it is
+    // (no ray sees past it), and plans landed on the maze's 0.3 m wall and 0.15 m from
+    // cliff_gap's 1.8 m rim, and the robot fell at both (2026-11-07). Stair risers (0.18 m)
+    // keep none: their treads' middle cells stay landable (docs/lidar_map_quality_plan.md).
     lidar_edge_margin_ = declare_parameter("standable.lidar_edge_margin", 0.1);
+    lidar_edge_min_drop_ = declare_parameter("standable.lidar_edge_min_drop", 0.3);
     // and this far from unseen cells, which can hide a drop: the body radius plus a typical
     // landing miss (a landing 0.15 m short on a wall's top, next to its unseen shadow, went
     // over the wall's front edge, 2026-11-07)
     unseen_margin_ = declare_parameter("standable.unseen_margin", 0.3);
-    // and count a step as an edge 8 cm sooner (0.093 m per cell, ~43 deg): a LiDAR map spreads a
-    // step over two cells (the stairs' 0.18 m risers read 0.09 + 0.09, a gentle slope), so a
-    // plan landed 5 cm past one and the robot fell off it (2026-11-07). 30 deg slopes (0.058 per
-    // cell) and the slanted pads stay landable.
-    lidar_steep_noise_ = declare_parameter("standable.lidar_steep_noise", 0.08);
+    // An edge is steeper than steep_grade (60 deg, 0.173 m per cell) less this much. It was
+    // 0.08 while the mapper spread a step over two cells (2026-11-07); the face-point filter
+    // ended that (docs/lidar_map_quality_plan.md, Fix 2). Note the stairs' 0.18 m risers are
+    // only 7 mm over the threshold: one mapped 1 cm low is no edge, and a tread's first cell
+    // becomes landable (0.02 keeps them edges).
+    lidar_steep_noise_ = declare_parameter("standable.lidar_steep_noise", 0.0);
     replan_enabled_ = declare_parameter("replan.enabled", true);
     replan_interval_ = declare_parameter("replan.min_interval", 5.0);       // [s]
     replan_height_tol_ = declare_parameter("replan.height_tolerance", 0.05);  // [m]
@@ -580,7 +582,8 @@ private:
       }
     }
     if (lidar) {
-      map->set_landable(std::move(landable), lidar_edge_margin_, unseen_margin_, lidar_steep_noise_);
+      map->set_landable(std::move(landable), lidar_edge_margin_, unseen_margin_, lidar_steep_noise_,
+        lidar_edge_min_drop_);
     }
     return map;
   }
@@ -1015,7 +1018,8 @@ private:
   double goal_x_ = 0.0, goal_y_ = 0.0;
   bool have_goal_ = false, goal_reached_ = false, map_changed_ = false;
   int failed_plans_ = 0;
-  double lidar_edge_margin_ = 0.1, unseen_margin_ = 0.3, lidar_steep_noise_ = 0.08;
+  double lidar_edge_margin_ = 0.1, unseen_margin_ = 0.3, lidar_steep_noise_ = 0.0;
+  double lidar_edge_min_drop_ = 0.3;
   ActivePlan active_;
   ReplanState replan_state_ = ReplanState::kIdle;
   std::string replan_reason_, pending_reason_;

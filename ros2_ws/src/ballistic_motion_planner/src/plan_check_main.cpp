@@ -17,6 +17,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <utility>
@@ -205,10 +207,143 @@ void print_plan(const Run & r, const PlannerParams & p)
   }
   std::printf("  stop tilt %.1f deg\n", deg(r.stances.back().tilt));
 }
+// The node's standable.* defaults (ballistic_planner_node.cpp): keep them equal.
+constexpr double kLidarEdgeMargin = 0.1, kUnseenMargin = 0.3, kLidarSteepNoise = 0.0;
+constexpr double kLidarEdgeMinDrop = 0.3;
+
+// ---- Plans on LiDAR maps the mapper built (docs/lidar_map_quality_plan.md, Fix 2) ----
+// mapper_check --map-out <dir> writes the map each scenario has at planning time;
+// this plans on it as the node would (its map contract, its target choice) and
+// checks every landing against the real terrain.
+struct LidarMargins
+{
+  const char * name;
+  double edge, unseen, steep_noise, edge_min_drop;  // set_landable's standable.* margins
+};
+
+std::optional<Map2D5> load_lidar_map(const std::string & file, const LidarMargins & mg)
+{
+  std::ifstream f(file);
+  int rows = 0, cols = 0;
+  double res = 0.0, ox = 0.0, oy = 0.0;
+  if (!(f >> rows >> cols >> res >> ox >> oy)) {
+    return std::nullopt;
+  }
+  std::vector<double> el(static_cast<size_t>(rows) * cols), ub(el.size());
+  for (auto * v : {&el, &ub}) {
+    for (auto & x : *v) {
+      std::string t;
+      f >> t;
+      x = t == "nan" ? NAN : std::stod(t);
+    }
+  }
+  Map2D5 m(cols * res, rows * res, res, ox, oy);
+  if (m.rows() != rows || m.cols() != cols) {
+    return std::nullopt;
+  }
+  // The node's convertMap: a measured cell is its height and landable; an unseen
+  // one is terrain at its bound, or OBSTACLE without one.
+  std::vector<uint8_t> landable(el.size(), 0);
+  for (int r = 0; r < rows; ++r) {
+    for (int c = 0; c < cols; ++c) {
+      const size_t i = static_cast<size_t>(r) * cols + c;
+      if (!std::isnan(el[i])) {
+        m.at(r, c) = el[i];
+        landable[i] = 1;
+      } else {
+        m.at(r, c) = std::isnan(ub[i]) ? Map2D5::OBSTACLE : ub[i];
+      }
+    }
+  }
+  m.set_landable(std::move(landable), mg.edge, mg.unseen, mg.steep_noise, mg.edge_min_drop);
+  return m;
+}
+
+struct LidarPlan
+{
+  bool planned = false, to_goal = false;
+  double tx = 0.0, ty = 0.0;
+  size_t hops = 0;
+  double worst_dz = 0.0;      // landing height against the real terrain there
+  double nearest_edge = 1e9;  // a landing's distance to real terrain 5 cm off its own
+  double edge_drop = 0.0;     // that edge's height difference
+  std::string landings;       // "(x, y) map z / real z" per hop
+};
+
+LidarPlan plan_on_lidar_map(const Map2D5 & m, const std::string & sc, const PlannerParams & p)
+{
+  LidarPlan out;
+  const auto & g = elevation_map_publisher::scenarios().at(sc);
+  const double sx = 0.0, sy = 0.0;
+  if (!ballistic::start_measured(m, sx, sy)) {
+    return out;
+  }
+  // The node's targets: the goal if standable, then two frontier cells 0.5 m apart.
+  const auto standable = m.standable_mask(p.robot_radius, p.side_clearance, p.steep_grade);
+  const auto [rg, cg] = m.world_to_grid(g.goal_x, g.goal_y);
+  const bool goal_ok = standable[static_cast<size_t>(rg) * m.cols() + cg];
+  std::vector<std::pair<double, double>> targets;
+  if (goal_ok) {targets.emplace_back(g.goal_x, g.goal_y);}
+  for (const auto & [r, c] : ballistic::frontier_candidates(m, standable, {sx, sy}, {g.goal_x, g.goal_y})) {
+    if (static_cast<int>(targets.size()) >= (goal_ok ? 1 : 0) + 2) {break;}
+    const auto xy = m.grid_to_world(r, c);
+    bool apart = true;
+    for (const auto & t : targets) {
+      apart = apart && std::hypot(t.first - xy.first, t.second - xy.second) >= 0.5;
+    }
+    if (apart && !(r == rg && c == cg)) {targets.push_back(xy);}
+  }
+  auto truth = [&](double x, double y) {
+      const double z = elevation_map_publisher::world_z(sc, x, y);
+      return z >= 5.0 ? INFINITY : z;
+    };
+  for (const auto & [tx, ty] : targets) {
+    ballistic::HoppingAStarPlanner planner(m, {sx, sy}, {tx, ty}, p);
+    const auto path = planner.plan();
+    if (!path) {continue;}
+    out.planned = true;
+    out.to_goal = tx == g.goal_x && ty == g.goal_y;
+    out.tx = tx;
+    out.ty = ty;
+    out.hops = path->size() - 1;
+    for (size_t i = 1; i < path->size(); ++i) {
+      const auto [x, y] = (*path)[i];
+      const auto [r, c] = m.world_to_grid(x, y);
+      const double zt = truth(x, y);
+      out.worst_dz = std::max(out.worst_dz, std::abs(m.at(r, c) - zt));
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "%s(%.2f, %.2f) %.2f/%.2f", i > 1 ? ", " : "", x, y, m.at(r, c), zt);
+      out.landings += buf;
+      for (double rad = 0.01; rad <= 0.4; rad += 0.01) {
+        bool found = false;
+        for (int k = 0; k < 64 && !found; ++k) {
+          const double a = 2.0 * M_PI * k / 64.0;
+          const double zz = truth(x + rad * std::cos(a), y + rad * std::sin(a));
+          if (std::abs(zz - zt) > 0.05) {
+            found = true;
+            if (rad < out.nearest_edge) {
+              out.nearest_edge = rad;
+              out.edge_drop = std::isfinite(zz) ? zz - zt : INFINITY;
+            }
+          }
+        }
+        if (found) {break;}
+      }
+    }
+    break;
+  }
+  return out;
+}
 }  // namespace
 
-int main()
+int main(int argc, char ** argv)
 {
+  std::string lidar_dir;
+  for (int a = 1; a < argc; ++a) {
+    if (!std::strcmp(argv[a], "--lidar-maps") && a + 1 < argc) {
+      lidar_dir = argv[++a];
+    }
+  }
   std::vector<Case> cases = {
     // The plans docs/follow_planner_plan.md expects (stage 3), as re-planned after
     // the bottom/side clearance split (robot_radius 0.15, side 0.03, bottom 0.2).
@@ -357,7 +492,8 @@ int main()
             }
           }
         }
-        m.set_landable(std::move(landable), 0.1, 0.3, 0.08);  // the node's standable.* margins
+        m.set_landable(std::move(landable), kLidarEdgeMargin, kUnseenMargin, kLidarSteepNoise,
+          kLidarEdgeMinDrop);
       };
     auto check_partial = [&](const std::string & name, const Map2D5 & m, double sx, double sy,
       double gx, double gy) {
@@ -456,6 +592,49 @@ int main()
       std::printf("\n== partial map: frontier: %zu candidates, nearest the goal (%.2f, %.2f)\n",
         cand.size(), fx, fy);
       check_partial("flat, goal unseen: frontier plan", fr, 0.0, 0.0, fx, fy);
+    }
+  }
+
+  if (!lidar_dir.empty()) {
+    // The margins before Fix 2 (they made up for the mapper's face smear) and the node's now.
+    const LidarMargins before{"before Fix 2", 0.1, 0.3, 0.08, 0.0};
+    const LidarMargins now{"node defaults", kLidarEdgeMargin, kUnseenMargin, kLidarSteepNoise,
+      kLidarEdgeMinDrop};
+    // For comparison: the 60 deg rule with 2 cm of measurement noise allowed (a jump
+    // over 0.153 m per cell is an edge): the stairs' 0.18 m risers sit 7 mm over the
+    // threshold, and a riser mapped 1 cm low stops being an edge.
+    const LidarMargins noise{"2 cm noise", kLidarEdgeMargin, kUnseenMargin, 0.02, kLidarEdgeMinDrop};
+    const PlannerParams p = ballistic::robot_params();
+    std::printf("\n== Plans on mapper_check's LiDAR maps (%s)\n", lidar_dir.c_str());
+    for (const auto & sc : {"flat", "low_wall", "stairs", "slope_30deg", "maze",
+        "cliff_gap", "lilypads", "slanted_pads"})
+    {
+      const std::string file = lidar_dir + "/lidar_map_" + sc + ".txt";
+      const LidarMargins sets[] = {before, now, noise};
+      for (int k = 0; k < 3; ++k) {
+        const LidarMargins & mg = sets[k];
+        const auto m = load_lidar_map(file, mg);
+        if (!m) {
+          std::printf("  %s: no map (%s)\n", sc, file.c_str());
+          break;
+        }
+        const auto r = plan_on_lidar_map(*m, sc, p);
+        std::printf("  %-16s %-13s ", sc, mg.name);
+        if (!r.planned) {
+          std::printf("NO PLAN\n");
+        } else {
+          std::printf("%s (%.2f, %.2f): %zu hops; landings within %.3f m of the real height, nearest "
+            "real edge %.2f m (%+.2f m)\n", r.to_goal ? "goal" : "frontier", r.tx, r.ty, r.hops,
+            r.worst_dz, r.nearest_edge, r.edge_drop);
+          std::printf("    landings, map / real height: %s\n", r.landings.c_str());
+        }
+        if (k == 1) {
+          const bool bad = r.planned && r.worst_dz > 0.05;
+          failures += bad;
+          summary.push_back(std::string("LiDAR map ") + sc + ": " + (!r.planned ? "no plan" :
+            bad ? "FAIL (a landing off the real height)" : std::to_string(r.hops) + " hops, pass"));
+        }
+      }
     }
   }
 

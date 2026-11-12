@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Offline checks of the LiDAR map's edges and of plans on it.** `mapper_check` reports phantoms
+  and sunken cells (against all the terrain under each cell) at planning time and at the end,
+  the error on flat terrain, and the share of points taken for faces; `--shift <m>` moves the
+  lattice against the world, `--no-face-filter` / `--no-edge-attribution` turn the new rules off,
+  and `--map-out <dir>` writes the map at planning time. `ballistic_plan_check --lidar-maps <dir>`
+  plans on those maps as the node would (its map contract and targets, frontier included), with
+  the margins before Fix 2, the node's, and a 2 cm steep-noise allowance, and checks every
+  landing against the real terrain (fails on one more than 5 cm off, with the node's margins).
 - **The elevation map is built from the LiDAR** (docs/lidar_mapping_plan.md, stages 0–5; new
   package `hopcopter_perception`). Gazebo's LiDAR and its IMU go through FAST-LIO to a new mapper,
   which publishes `/elevation_map` for the unchanged planner and hopcopter.
@@ -303,6 +311,47 @@
     was later redesigned; see "Changed".)
 
 ### Changed
+- **The mapper no longer lets a vertical face set a floor's height** (docs/lidar_map_quality_plan.md,
+  Fix 2). A face (a riser, a pole's side, a wall) usually sits on a cell border, and the 2 cm range
+  noise scattered its points into the floor cell in front, which "a higher hit replaces" handed
+  the face's height: every face the LiDAR saw was a cell (10 cm) fatter toward it. On 2026-11-10
+  that put every stair edge a cell early, and a 0.94 m phantom beside a maze pole blocked the
+  robot's hop. Three rules (`ElevationMapper`, `face.*` and `edge.*` parameters):
+  - **Face points.** A point that forms, with another point of the same scan, a line steeper
+    than 60° (the planner's own limit) and 5–50 cm tall, within 6 cm in xy, is on a face. Where a
+    cell has ground hits, face points are ignored there. A cell only faces reached (a pole's
+    inside, a tread above the sensor) works as before, but is published unseen (its bound, or an
+    obstacle), never a landing. On flat ground 0.5–1.6% of the points are taken for faces.
+    A 10 cm search radius flagged tread points near each edge and doubled the phantoms; flagging
+    only the lower point of a pair tripled them.
+  - **Edge attribution.** Noise also moves a top surface's points past its edge along the ray (a
+    step's edge seen from above lands on the tread below). A hit that would raise a cell with
+    at least 5 hits is credited instead to a neighbour within 3 σ of the ray's horizontal noise,
+    along the ray, whose estimate is already as high. Without the 5-hit floor a cell that started
+    low could never be raised; with it, sparsely seen cells stay exposed.
+  - Such a credited hit no longer resets a run of lower hits that is correcting the cell.
+
+  `mapper_check` (phantoms: cells more than 5 cm above all the terrain under them, at planning
+  time / at the end; old mapper → new): stairs 249/308 → 75/49, low_wall 87/88 → 40/2, maze
+  8/71 → 0/0, slope_30deg 23/76 → 14/39, stairs_with_curb 207/284 → 89/29. With the lattice
+  shifted 3 cm (faces inside cells, as in the real world) stairs, stairs_with_curb, maze, slope
+  and cliff_gap have none. What remains is mostly a rim seen only from above (cliff_gap, lilypads,
+  slanted_pads, the stairs' far side): no ray sees past it, so the cell beyond reads the rim's
+  height. The worlds put every face on a cell border, the worst case. The mapper takes 11 ms a
+  scan in `mapper_check` (5.5 before).
+- **The planner's LiDAR-map margins** (`ballistic_planner_node`): `standable.lidar_steep_noise`
+  0.08 → 0, so an edge is again a jump steeper than 60° (it made 9.3 cm per cell an edge, and
+  noise put false edges on the 30° slope). `standable.lidar_edge_margin` (0.1) now applies only to
+  edges dropping at least `standable.lidar_edge_min_drop` (0.3 m): a rim seen from above still
+  reads a cell wide, and the robot fell at the maze's wall and cliff_gap's rim, but stair risers
+  (0.18 m) keep their treads' middle cells landable, as on the known map. Planned on the maps
+  `mapper_check` builds at planning time, stairs now climbs the stairs (7 hops, frontier on
+  tread 6) instead of hopping around them on the floor (3 hops), which is what the 2026-11-10 run
+  did. The 0.18 m risers are 7 mm over the 60° threshold (0.173 m per cell): one mapped 1 cm low
+  is no edge, and three of the stairs' landings then land on a tread's first cell, 5 cm past a
+  riser; `lidar_steep_noise` 0.02 puts them all on middle cells. Open: on the aligned lattice the
+  frontier cell on tread 6 reads 10 cm high (seen at 10° from the start). `ballistic_parity_test`
+  is byte-identical; the 15 cases and the partial-map cases pass.
 - **The planner reads a LiDAR map's contract** (docs/lidar_mapping_plan.md, "The map contract").
   A map with an `upper_bound` layer is a LiDAR map:
   - an unseen cell with a bound is terrain at the bound for the clearance test and never a
@@ -576,6 +625,16 @@
   the Python reference. `validate_params` still passes (first-hop tan floor 0.833 < ceiling 1.0).
 
 ### Fixed
+- **A perception node left over from an earlier launch duplicated the sensor streams**
+  (docs/lidar_map_quality_plan.md, Fix 1). On 2026-11-10 `gz_truth_tf` and `lidar_sim_adapter`
+  from an 18:48 launch kept running, so FAST-LIO got every scan and IMU sample twice, out of
+  order, cleared its buffers ("loop back, clear buffer") and diverged (0.15–3 m jumps at
+  touchdowns, km in long runs); the maps were drawn on that pose. Signatures: 14–18 scans/s at
+  the mapper, half the `data_lio` stamps duplicated. `lio_anchor` now refuses to release the
+  robot while `/lio/points`, `/lio/imu` or `/lidar/points` (`single_publisher_topics`) has more
+  than one publisher, and the mapper warns above 11 scans/s (`max_scan_rate`) or on a scan not
+  newer than the last. On 2026-11-11, clean: FAST-LIO RMSE 1.4–1.7 cm, no duplicates,
+  9.4–9.8 scans/s, map median 0.6–0.9 cm.
 - **`clearance_apex` returned NaN, not inf, when an infinitely tall cell was under the arc**
   (`JumpLib/takeoff_solver.py`). `need > apex` was then false, and the hop flew. That was the
   maze's poles on a known map, and every unbounded unseen cell on a LiDAR map.
@@ -596,6 +655,10 @@
   8.133 measured. The old march misses it at 0.05 m too; the rim check is the fix.
 
 ### Removed
+- The `stairs_with_curb` scenario: its map in `scenarios.hpp`, its Gazebo world
+  `crazysim_stairs_with_curb.sdf`, its README section, and its entries in `mapper_check` and
+  `ballistic_plan_check --lidar-maps`. No longer needed. The reference planner's
+  `maps/stairs_with_curb.py` stays in `hopcopter-ballistic-planning/`.
 - `hopcopter`: `JumpingHeightController` and its calls (`estimate_height`, `update_apex_state`,
   `step`). The class stays in `JumpLib/jumping_tools.py`, unused.
 - `hopcopter`: the distance pop (`current_goal_tolerance`), `_load_next_waypoint`, the

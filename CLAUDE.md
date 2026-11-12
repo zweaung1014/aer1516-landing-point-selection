@@ -89,9 +89,11 @@ offline executables (no ROS graph): `ros2 run ballistic_motion_planner ballistic
 (the reference search against the Python port; its output must stay byte-identical) and
 `ballistic_plan_check` (the momentum-aware search on 15 cases: landing tilts, the expected plans,
 and the controller's leg-angle guard and push capacity with real speeds for η 0.71–0.85; then 5
-partial LiDAR maps; ~2 min, exits 1 on a failure). `ros2 run hopcopter_perception mapper_check`
-flies a simulated Mid-360 along each world's known-map plan and scores the map it builds (~1 min,
-exits 1 on a failure). Everything else is verified by running the sim and inspecting the CSVs it
+partial LiDAR maps; ~2 min, exits 1 on a failure; `--lidar-maps <dir>` also plans on the maps
+`mapper_check --map-out <dir>` writes and checks each landing against the real terrain).
+`ros2 run hopcopter_perception mapper_check` flies a simulated Mid-360 along each world's
+known-map plan and scores the map it builds (~1 min, exits 1 on a failure; it also reports
+phantom cells, and `--shift 0.03` moves the lattice off the worlds' faces). Everything else is verified by running the sim and inspecting the CSVs it
 writes (below).
 
 ### Analysis scripts (run from the repo root, not the workspace)
@@ -217,7 +219,7 @@ solves the takeoff, and commands the landing attitude as roll/pitch. Each decisi
 **3. `elevation_map_publisher_node`** (`elevation_map_publisher/`) publishes the **known** 2.5D
 map on `/elevation_map` (`grid_map_msgs/GridMap`, transient_local so late subscribers still get
 it). The scenario is selectable by parameter: `low_wall`, `flat`, or `stairs`,
-`stairs_with_curb`, `slope_30deg`, `cliff_gap`, `maze`, which mirror the reference maps (all but the slope
+`slope_30deg`, `cliff_gap`, `maze`, which mirror the reference maps (all but the slope
 and maze edited so the robot can plan them), `lilypads` (2 m platforms and pads, no reference file; spawn with `-z 3.4`), and `slanted_pads`
 (the same platforms with seven 12–20° sloped pads in a forced zigzag; `-z 3.4`). Each has a Gazebo twin `worlds/crazysim_<scenario>.sdf`,
 placed so the reference START is world (0, 0). The README's "Other worlds" table has the goals. `ballistic_planner_node`
@@ -245,6 +247,8 @@ CHANGELOG.md the reasons for its parameters):
   - on FAST-LIO, the raw scan read as `body`;
   - with `pose_source:=gazebo`, the scan in `cf_0/lidar` on Gazebo's pose.
 
+  It ignores points on vertical faces where a cell has ground hits, and credits a hit that would
+  raise a cell to the neighbour whose edge it came from (docs/lidar_map_quality_plan.md, Fix 2).
   It publishes `/elevation_map` at 2 Hz with layers `elevation` (NaN = no usable height),
   `upper_bound` (NaN = no ray bounds it), `variance` and `hits`. Foot contacts from hopcopter
   (`/hopcopter/foot_contact`) are near-certain heights, and the first one fills a 0.6 m start disk.
@@ -253,8 +257,8 @@ CHANGELOG.md the reasons for its parameters):
   - an unseen cell with a bound is terrain at the bound for the clearance tests (planner and
     hopcopter) but never a landing;
   - an unseen, unbounded cell is OBSTACLE;
-  - landings keep 0.3 m from unseen cells and a cell further from steep edges, and steps count as
-    edges 8 cm sooner;
+  - landings keep 0.3 m from unseen cells, and 0.1 m further from steep edges that drop 0.3 m or
+    more (none on the stairs); an edge is a jump steeper than 60°, as on a hand-made map;
   - a hand-made map (no layer) keeps every finite cell landable.
 
   On a LiDAR map the planner also refuses an unmeasured start, makes frontier plans to goals not

@@ -18,11 +18,32 @@
 //    something taller than any ray that reached it (a 3 m pole seen from 1.5 m);
 //  - foot contacts, written as near-certain heights, and at the first contact a
 //    disk of assumed heights around it (the blind zone the robot takes off over).
+//
+// Face points (docs/lidar_map_quality_plan.md, Fix 2): a hit on a vertical face
+// (a riser, a pole's side, a wall) sits on the border of two cells, and range
+// noise scatters some of its hits into the floor cell in front, which as the
+// highest hit it would take over: every face the LiDAR sees grew a cell toward
+// it. So each scan's points are classified first: a point that forms, with
+// another point of the same scan, a line steeper than face_min_slope (60 deg)
+// and at least face_min_dz tall is on a face. Where a cell has ground hits, a
+// face point is ignored there; in a cell nothing but faces reached (a pole's
+// inside, a step whose top no ray saw) face points work as any hit did before,
+// and the cell's first ground hit replaces them. Such a cell is never published as
+// measured: it is unseen, at its bound (or an obstacle without one).
+//
+// Edge attribution: range noise also moves a top surface's points a few cm past
+// its edge along the ray (a step's edge seen from above lands on the tread
+// below). A hit that would raise a cell with edge_min_support hits is credited
+// to the neighbour it may have come from instead: one within edge_sigmas of the
+// ray's horizontal noise, along the ray, whose estimate is already at least as
+// high. Such a hit also never interrupts a run of lower hits that is correcting
+// the cell (a stray edge point agreeing with a wrong estimate would reset it).
 #pragma once
 
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
@@ -81,6 +102,20 @@ struct MapperParams
 
   // Assumed ground around the first foot contact; 0 turns it off.
   double start_disk_radius = 0.6;
+
+  // Face points (see the top of this file).
+  bool face_filter = true;
+  double face_min_dz = 0.05;      // [m] the pair's height difference, at least (noise is ~2 cm)
+  double face_max_dz = 0.5;       // [m] and at most (not a floor under an overhang)
+  double face_radius = 0.06;      // [m] the farthest pair, in xy
+  double face_min_slope = 1.732;  // dz / dxy: tan 60 deg, the planner's steepest slope
+
+  // Edge attribution (see the top of this file).
+  bool edge_attribution = true;
+  double edge_sigmas = 3.0;  // how far back and ahead along the ray, in range_sigma (horizontal)
+  // A cell's estimate needs this many hits before it is protected: a cell that
+  // started wrong (a stray low point) must still be raised to its surface.
+  int edge_min_support = 5;
 };
 
 class ElevationMapper
@@ -88,6 +123,7 @@ class ElevationMapper
 public:
   static constexpr uint8_t kAssumed = 1;   // start disk: replaced by the first hit
   static constexpr uint8_t kContact = 2;   // a foot contact: near-certain
+  static constexpr uint8_t kFace = 4;      // only face points reached this cell so far
 
   explicit ElevationMapper(const MapperParams & p);
 
@@ -128,9 +164,25 @@ public:
   long heights_cleared() const {return n_cleared_;}
   long rays_through_surfaces() const {return n_through_;}
   long hits_used() const {return n_hits_;}
+  long points_classified() const {return n_points_;}
+  long face_points() const {return n_face_points_;}
+  long face_hits_ignored() const {return n_face_ignored_;}
+  long hits_attributed() const {return n_attributed_;}
+  // The last scan's face flags (one per point, 1 = on a face), for diagnostics.
+  const std::vector<char> & last_faces() const {return face_;}
 
 private:
-  void hit(size_t i, double z, double var);
+  // Where a hit came from, for edge attribution: its xy, the ray's horizontal
+  // direction (unit) and how far along it the noise may have moved it.
+  struct HitRay
+  {
+    double x, y, ux, uy, band;
+  };
+  void hit(size_t i, double z, double var, bool face, const HitRay & ray);
+  // A neighbour, within ray.band along the ray, whose estimate explains z.
+  bool attributable(size_t i, double z, double var, const HitRay & ray) const;
+  // face_[k] = 1 for the points on a vertical face (see the top of this file)
+  void classify_faces(const std::vector<Eigen::Vector3d> & points);
   // false: the ray passed through a trusted surface (see trusted_hits)
   bool carve(const Eigen::Vector3d & o, const Eigen::Vector3d & p, double range);
   void reset_below(size_t i);
@@ -152,7 +204,9 @@ private:
   std::vector<float> below_mean_, below_m2_;
   bool have_contact_ = false;
   long n_scans_ = 0, n_cleared_ = 0, n_hits_ = 0, n_through_ = 0;
-  std::vector<char> ray_ok_;
+  long n_points_ = 0, n_face_points_ = 0, n_face_ignored_ = 0, n_attributed_ = 0;
+  std::vector<char> ray_ok_, face_;
+  std::vector<std::pair<uint64_t, uint32_t>> buckets_;  // (bucket key, point), sorted
 };
 
 }  // namespace hopcopter_perception

@@ -48,24 +48,24 @@ public:
   // (row-major, uint8). A LiDAR map's unseen cells carry their upper bound as
   // their height, so the clearance test flies over them above it, but they are
   // never standable. Empty (the default, and every hand-made map): all cells.
-  // edge_margin: a LiDAR map puts a terrain edge up to a cell outward (a face's
-  // hits spill into the cell in front of it), so landings keep this much more
-  // away from steep edges there.
+  // edge_margin: landings keep this much more away from steep edges whose drop
+  // is at least edge_min_drop (all steep edges at 0): a rim seen from above can
+  // read a cell wider than it is (the LiDAR cannot see past it), and a miss there
+  // is a fall.
   // unseen_margin: landings keep this far from unseen cells (they can hide a
   // drop, e.g. right behind a wall whose shadow is bounded at the wall's height);
   // at least the body radius.
-  // steep_noise: a LiDAR map spreads a step over two cells (a face's hits fuse
-  // into a mean in the cell in front of it), so the stairs' 0.18 m risers read as
-  // two 0.09 m steps, under the steep threshold (0.173 m per cell); there an edge
-  // is a height difference over min_grade * dist less steep_noise.
+  // steep_noise: an edge is a height difference over min_grade * dist less
+  // steep_noise (an allowance for the map's height noise).
   void set_landable(
     std::vector<uint8_t> mask, double edge_margin = 0.0, double unseen_margin = 0.0,
-    double steep_noise = 0.0)
+    double steep_noise = 0.0, double edge_min_drop = 0.0)
   {
     landable_ = std::move(mask);
     edge_margin_ = edge_margin;
     unseen_margin_ = unseen_margin;
     steep_noise_ = steep_noise;
+    edge_min_drop_ = edge_min_drop;
   }
   bool landable(int row, int col) const
   {
@@ -102,7 +102,8 @@ public:
   // out with a "# TEMP" note): obstacle cells dilated by radius + clearance,
   // finite steep edges block only themselves (no dilation). On a LiDAR map
   // (set_landable), cells within max(radius, unseen_margin) of an unmeasured
-  // cell, or within edge_margin of a steep edge, are not standable either.
+  // cell, or within edge_margin of a steep edge (one dropping at least
+  // edge_min_drop), are not standable either.
   std::vector<uint8_t> standable_mask(
     double radius, double clearance, double steep_grade) const;
 
@@ -123,7 +124,7 @@ private:
   int rows_, cols_;
   std::vector<double> grid_;
   std::vector<uint8_t> landable_;
-  double edge_margin_ = 0.0, unseen_margin_ = 0.0, steep_noise_ = 0.0;
+  double edge_margin_ = 0.0, unseen_margin_ = 0.0, steep_noise_ = 0.0, edge_min_drop_ = 0.0;
 };
 
 }  // namespace ballistic

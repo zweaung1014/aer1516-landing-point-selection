@@ -175,9 +175,33 @@ std::vector<uint8_t> Map2D5::standable_mask(
       out[i] = out[i] && !near_unseen[i];
     }
     if (edge_margin_ > 0.0) {
+      // Only edges that drop at least edge_min_drop: both cells of each such pair.
+      std::vector<uint8_t> big_edge = edge_blocked;
+      if (edge_min_drop_ > 0.0) {
+        std::fill(big_edge.begin(), big_edge.end(), 0);
+        for (int r = 0; r < rows_; ++r) {
+          for (int c = 0; c < cols_; ++c) {
+            const size_t i = static_cast<size_t>(r) * cols_ + c;
+            if (!edge_blocked[i]) {continue;}
+            for (int dr = -1; dr <= 1; ++dr) {
+              for (int dc = -1; dc <= 1; ++dc) {
+                const int rr = r + dr, cc = c + dc;
+                if ((dr || dc) && rr >= 0 && cc >= 0 && rr < rows_ && cc < cols_) {
+                  const size_t j = static_cast<size_t>(rr) * cols_ + cc;
+                  if (edge_blocked[j] && grid_[j] != OBSTACLE && grid_[i] != OBSTACLE &&
+                    std::abs(grid_[j] - grid_[i]) >= edge_min_drop_)
+                  {
+                    big_edge[i] = 1;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
       // + half a cell: dilate_bool is strict (<), and a margin of one cell must
       // reach the neighbours
-      const auto near_edge = dilate_bool(edge_blocked, edge_margin_ + 0.5 * resolution_);
+      const auto near_edge = dilate_bool(big_edge, edge_margin_ + 0.5 * resolution_);
       for (size_t i = 0; i < grid_.size(); ++i) {
         out[i] = out[i] && !near_edge[i];
       }

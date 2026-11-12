@@ -4,11 +4,11 @@
 //
 // Scenarios mirror the maps in hopcopter-ballistic-planning/maps/. "low_wall"
 // and "flat" are painted in world coordinates. The others ("stairs",
-// "stairs_with_curb", "slope_30deg", "cliff_gap", "maze") are painted in their
+// "slope_30deg", "cliff_gap", "maze") are painted in their
 // reference file's frame and placed so its START sits at world (0, 0), where
 // the robot spawns: origin = -START. "lilypads" and "slanted_pads" have no
 // reference file and are painted in world coordinates. Each has a Gazebo twin,
-// worlds/crazysim_<scenario>.sdf. stairs, stairs_with_curb and cliff_gap are
+// worlds/crazysim_<scenario>.sdf. stairs and cliff_gap are
 // edited from the reference files so the robot's planner (robot_params()) can
 // plan them; see CHANGELOG.md.
 #pragma once
@@ -37,7 +37,6 @@ inline const std::map<std::string, Scenario> & scenarios()
     {"flat", {5.0, 5.0, -0.5, -2.5, 4.0, 0.0}},
     {"low_wall", {5.0, 5.0, -0.5, -2.5, 4.0, 0.0}},
     {"stairs", {5.0, 5.0, -0.5, -4.5, 4.0, -2.0}},
-    {"stairs_with_curb", {5.0, 5.0, -0.5, -2.5, 4.0, 0.0}},
     {"slope_30deg", {5.0, 5.0, -0.5, -4.5, 4.25, -2.0}},
     {"cliff_gap", {15.0, 5.0, -0.5, -2.5, 9.5, 0.5}},
     {"maze", {15.0, 5.0, -0.5, -2.5, 14.0, 0.0}},
@@ -62,7 +61,6 @@ inline bool in(double v, double lo, double hi)
 inline double reference_z(const std::string & scenario, double x, double y)
 {
   using detail::in;
-  const double kNone = std::numeric_limits<double>::quiet_NaN();  // unbounded side
   const double slope = std::tan(30.0 * M_PI / 180.0);
   if (scenario == "stairs") {
     // maps/stairs.py resized to human stairs, about half the robot's 0.37 m
@@ -73,18 +71,6 @@ inline double reference_z(const std::string & scenario, double x, double y)
       return 0.0;
     }
     return 0.18 * std::min(8, 1 + static_cast<int>(std::floor((x - 1.5 + 1e-9) / 0.3)));
-  }
-  if (scenario == "stairs_with_curb") {
-    // maps/stairs_with_curb.py with 0.15 m curbs on 1.0 m treads (was 0.6 m on
-    // 0.4 m from x 2.0). Full width: no bypass.
-    const double curb = 0.15;
-    if (in(x, 1.2, 1.4)) {return 0.40 + curb;}
-    if (in(x, 1.4, 2.4)) {return 0.40;}
-    if (in(x, 2.4, 2.6)) {return 0.80 + curb;}
-    if (in(x, 2.6, 3.6)) {return 0.80;}
-    if (in(x, 3.6, 3.8)) {return 1.20 + curb;}
-    if (in(x, 3.8, kNone)) {return 1.20;}
-    return 0.0;
   }
   if (scenario == "slope_30deg") {
     // maps/slope_30deg.py, unchanged: 30 deg from x 1.0, platform from 4.5.

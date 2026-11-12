@@ -68,6 +68,11 @@ bool ElevationMapper::confirmed(size_t i) const
 
 double ElevationMapper::elevation(size_t i) const
 {
+  // Only faces reached it (a tread above the sensor, a pole's inside): no ground
+  // to land on. It stays unseen, at its bound (or an obstacle) for clearance.
+  if (flags_[i] & kFace) {
+    return kNaN;
+  }
   return confirmed(i) ? h_[i] : kNaN;
 }
 
@@ -85,6 +90,7 @@ void ElevationMapper::integrate_scan(
   const Eigen::Vector3d & origin, const std::vector<Eigen::Vector3d> & points)
 {
   ++n_scans_;
+  classify_faces(points);
   // Carve first, then the hits: within one scan a hit wins over a ray that
   // grazed past it.
   ray_ok_.assign(points.size(), 1);
@@ -110,22 +116,136 @@ void ElevationMapper::integrate_scan(
     if (!cell_of(pt.x(), pt.y(), row, col)) {
       continue;
     }
+    const double dxy = std::hypot(d.x(), d.y());
     const double sin_el = std::abs(d.z()) / r;
-    const double cos_el = std::hypot(d.x(), d.y()) / r;
+    const double cos_el = dxy / r;
     const double s_r = p_.range_sigma * sin_el;
     const double s_a = r * p_.attitude_sigma * cos_el;
-    hit(index(row, col), pt.z(), s_r * s_r + s_a * s_a + p_.min_sigma * p_.min_sigma);
+    HitRay ray{pt.x(), pt.y(), 0.0, 0.0, 0.0};
+    if (p_.edge_attribution && dxy > 1e-6) {
+      ray.ux = d.x() / dxy;
+      ray.uy = d.y() / dxy;
+      ray.band = p_.edge_sigmas * p_.range_sigma * cos_el;
+    }
+    hit(index(row, col), pt.z(), s_r * s_r + s_a * s_a + p_.min_sigma * p_.min_sigma, face_[k], ray);
   }
 }
 
-void ElevationMapper::hit(size_t i, double z, double var)
+void ElevationMapper::classify_faces(const std::vector<Eigen::Vector3d> & points)
 {
+  const size_t n = points.size();
+  face_.assign(n, 0);
+  if (!p_.face_filter || n == 0) {
+    return;
+  }
+  // Buckets face_radius wide: every partner of a point lies in its own bucket or
+  // one of the eight around it.
+  const double w = p_.face_radius;
+  auto key_of = [w](double x, double y, int dx, int dy) {
+      const int64_t bx = static_cast<int64_t>(std::floor(x / w)) + dx;
+      const int64_t by = static_cast<int64_t>(std::floor(y / w)) + dy;
+      return (static_cast<uint64_t>(bx) << 32) ^ static_cast<uint64_t>(static_cast<uint32_t>(by));
+    };
+  buckets_.resize(n);
+  for (size_t k = 0; k < n; ++k) {
+    buckets_[k] = {key_of(points[k].x(), points[k].y(), 0, 0), static_cast<uint32_t>(k)};
+  }
+  std::sort(buckets_.begin(), buckets_.end());
+  const double r2 = p_.face_radius * p_.face_radius;
+  const double s2 = p_.face_min_slope * p_.face_min_slope;
+  long n_face = 0;
+  for (size_t k = 0; k < n; ++k) {
+    const Eigen::Vector3d & a = points[k];
+    bool face = false;
+    for (int dx = -1; dx <= 1 && !face; ++dx) {
+      for (int dy = -1; dy <= 1 && !face; ++dy) {
+        const uint64_t key = key_of(a.x(), a.y(), dx, dy);
+        auto it = std::lower_bound(buckets_.begin(), buckets_.end(),
+            std::make_pair(key, uint32_t{0}));
+        for (; it != buckets_.end() && it->first == key; ++it) {
+          const Eigen::Vector3d & b = points[it->second];
+          const double dz = std::abs(a.z() - b.z());
+          if (dz < p_.face_min_dz || dz > p_.face_max_dz) {
+            continue;
+          }
+          const double ex = a.x() - b.x(), ey = a.y() - b.y();
+          const double d2 = ex * ex + ey * ey;
+          if (d2 <= r2 && dz * dz >= s2 * d2) {
+            face = true;
+            break;
+          }
+        }
+      }
+    }
+    face_[k] = face;
+    n_face += face;
+  }
+  n_points_ += static_cast<long>(n);
+  n_face_points_ += n_face;
+}
+
+bool ElevationMapper::attributable(size_t i, double z, double var, const HitRay & ray) const
+{
+  if (ray.band <= 0.0) {
+    return false;
+  }
+  for (const double f : {-1.0, -0.5, 0.5, 1.0}) {
+    int r, c;
+    if (!cell_of(ray.x + f * ray.band * ray.ux, ray.y + f * ray.band * ray.uy, r, c)) {
+      continue;
+    }
+    const size_t j = index(r, c);
+    if (j == i || std::isnan(h_[j])) {
+      continue;
+    }
+    if (h_[j] >= z - p_.mahalanobis_threshold * std::sqrt(var + var_[j])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ElevationMapper::hit(size_t i, double z, double var, bool face, const HitRay & ray)
+{
+  if (face) {
+    // A face point says nothing about the ground of the cell it fell in (it may
+    // be a few cm in front of its face). Where ground hits or a contact made the
+    // estimate, they decide.
+    if (!std::isnan(h_[i]) && !(flags_[i] & (kFace | kAssumed))) {
+      ++n_face_ignored_;
+      return;
+    }
+  } else if (flags_[i] & kFace) {
+    // The cell's first ground hit replaces what only faces said.
+    ++n_hits_;
+    ++hits_[i];
+    h_[i] = z;
+    var_[i] = var;
+    flags_[i] &= static_cast<uint8_t>(~kFace);
+    fresh_[i] = 1;
+    clear_[i] = 0;
+    reset_below(i);
+    return;
+  }
+  if (!std::isnan(h_[i]) && !(flags_[i] & (kAssumed | kContact)) &&
+    fresh_[i] >= p_.edge_min_support &&
+    z - h_[i] > p_.mahalanobis_threshold * std::sqrt(var_[i] + var) &&
+    attributable(i, z, var, ray))
+  {
+    // It would raise this cell, but a neighbour as high explains it: noise
+    // moved it here past that neighbour's edge.
+    ++n_attributed_;
+    return;
+  }
   ++n_hits_;
   ++hits_[i];
   if (std::isnan(h_[i]) || (flags_[i] & kAssumed)) {
     h_[i] = z;
     var_[i] = var;
     flags_[i] &= static_cast<uint8_t>(~kAssumed);
+    if (face) {
+      flags_[i] |= kFace;
+    }
     fresh_[i] = 1;
     clear_[i] = 0;
     reset_below(i);
@@ -174,7 +294,11 @@ void ElevationMapper::hit(size_t i, double z, double var)
     ++fresh_[i];
   }
   clear_[i] = 0;
-  reset_below(i);
+  // A run of lower hits is correcting this estimate: a hit a neighbour explains
+  // (a stray point from its edge) does not stop it.
+  if (below_n_[i] == 0 || !attributable(i, z, var, ray)) {
+    reset_below(i);
+  }
 }
 
 void ElevationMapper::reset_below(size_t i)
@@ -287,7 +411,7 @@ bool ElevationMapper::carve(const Eigen::Vector3d & o, const Eigen::Vector3d & p
       {
         h_[i] = kNaN;
         var_[i] = kInf;
-        flags_[i] &= static_cast<uint8_t>(~kAssumed);
+        flags_[i] &= static_cast<uint8_t>(~(kAssumed | kFace));
         fresh_[i] = 0;
         clear_[i] = 0;
         reset_below(i);

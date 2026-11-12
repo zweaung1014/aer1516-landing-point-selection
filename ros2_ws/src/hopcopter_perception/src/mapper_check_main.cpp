@@ -11,10 +11,22 @@
 //  - height error on observed cells: median <= 2 cm, 95th percentile <= 5 cm;
 //  - no false obstacles (> 10 cm above the truth) away from terrain edges;
 //  - errors over 10 cm only within one cell of an edge;
+// Reported, not failed on (docs/lidar_map_quality_plan.md): phantoms, cells reading
+// more than 5 cm above every terrain under them (the floor in front of a face taking
+// its height, a rim seen from above read a cell wider), at planning time and at the
+// end; sunken cells, more than 5 cm below it all; and the error on flat terrain.
 //  - no upper bound below the terrain (that would let the planner fly into it);
 //  - along the plan: every landing cell measured, every cell under every arc
 //    measured or bounded.
-// Usage: mapper_check [scenario ...] [--pose-noise <deg>] [--json <dir>] [--verbose].
+// --shift <m> moves the map's lattice by that much in x and y against the world, so
+// faces that sit on cell borders in the worlds fall inside cells.
+// --no-face-filter and --no-edge-attribution turn those off (both off: the mapper before Fix 2).
+// --map-out <dir> writes the map at planning time (after the warm-up hops) to
+// <dir>/lidar_map_<scenario>.txt, for ballistic_plan_check --lidar-maps <dir>:
+// "rows cols resolution origin_x origin_y", then the elevation and the
+// upper_bound, row by row (row = y), nan where there is none.
+// Usage: mapper_check [scenario ...] [--pose-noise <deg>] [--shift <m>] [--no-face-filter]
+//   [--no-edge-attribution] [--map-out <dir>] [--json <dir>] [--verbose].
 // Exits 1 if a scenario fails.
 #include <algorithm>
 #include <chrono>
@@ -56,9 +68,6 @@ const std::map<std::string, std::vector<Waypoint>> kPlans = {
   {"stairs", {{0.05, 0.05, 0.8}, {0.75, -0.95, 0.742}, {0.85, -1.25, 1.084}, {1.15, -1.25, 1.265},
       {1.45, -1.25, 1.265}, {1.75, -1.25, 1.265}, {2.05, -1.25, 1.265}, {2.35, -1.25, 1.265},
       {2.65, -1.25, 1.265}, {4.05, -1.95, 1.060}}},
-  {"stairs_with_curb", {{0.05, 0.05, 0.8}, {0.15, 0.05, 0.975}, {1.35, 0.05, 1.100},
-      {1.45, 0.05, 0.975}, {2.35, 0.05, 1.109}, {2.65, 0.05, 0.970}, {3.55, 0.05, 1.109},
-      {4.05, 0.05, 0.744}}},
   {"slope_30deg", {{0.05, 0.05, 0.8}, {0.75, -0.95, 0.844}, {1.15, -1.05, 0.984},
       {1.55, -1.15, 0.984}, {1.95, -1.25, 0.984}, {2.35, -1.35, 0.984}, {2.75, -1.45, 0.984},
       {3.15, -1.55, 0.984}, {3.55, -1.65, 0.984}, {4.25, -1.95, 0.982}}},
@@ -236,6 +245,25 @@ double percentile(std::vector<double> v, double q)
   return v[k];
 }
 
+void write_map(const std::string & file, const ElevationMapper & m)
+{
+  std::ofstream f(file);
+  const auto & p = m.params();
+  f << m.rows() << " " << m.cols() << " " << p.resolution << " " << p.origin_x << " " << p.origin_y
+    << "\n";
+  for (int layer = 0; layer < 2; ++layer) {
+    for (int r = 0; r < m.rows(); ++r) {
+      for (int c = 0; c < m.cols(); ++c) {
+        const size_t i = m.index(r, c);
+        const double v = layer == 0 ? m.elevation(i) : m.upper_bound(i);
+        f << (c ? " " : "");
+        if (std::isfinite(v)) {f << v;} else {f << "nan";}
+      }
+      f << "\n";
+    }
+  }
+}
+
 void write_json(
   const std::string & file, const std::string & sc, const ElevationMapper & m,
   const std::vector<double> & truth, const std::vector<Pose> & traj)
@@ -298,15 +326,18 @@ struct Result
 };
 
 Result check(
-  const std::string & sc, double pose_noise_deg, const std::string & json_dir, bool verbose)
+  const std::string & sc, double pose_noise_deg, double shift, bool face_filter,
+  bool edge_attribution, const std::string & map_dir, const std::string & json_dir, bool verbose)
 {
   const auto & s = elevation_map_publisher::scenarios().at(sc);
   MapperParams p;
   p.size_x = s.size_x;
   p.size_y = s.size_y;
-  p.origin_x = s.origin_x;
-  p.origin_y = s.origin_y;
+  p.origin_x = s.origin_x + shift;
+  p.origin_y = s.origin_y + shift;
   p.attitude_sigma = std::max(0.002, pose_noise_deg * kDeg);
+  p.face_filter = face_filter;
+  p.edge_attribution = edge_attribution;
   ElevationMapper m(p);
   const World w(sc);
   const auto traj = trajectory(sc, w);
@@ -324,6 +355,35 @@ Result check(
   std::normal_distribution<double> noise(0.0, 0.02), att(0.0, pose_noise_deg * kDeg);
   double ms = 0.0;
   std::vector<Eigen::Vector3d> pts;
+  // Cells reading more than 5 cm above every terrain under them (see the scoring below).
+  auto count_phantoms = [&]() {
+      int n = 0;
+      for (int r = 0; r < m.rows(); ++r) {
+        for (int c = 0; c < m.cols(); ++c) {
+          const size_t i = m.index(r, c);
+          const double e = m.elevation(i);
+          if (std::isnan(e) || (m.flags(i) & (ElevationMapper::kAssumed | ElevationMapper::kContact))) {
+            continue;
+          }
+          double hi = -INFINITY;
+          for (int a = 0; a < 10; ++a) {
+            for (int b = 0; b < 10; ++b) {
+              hi = std::max(hi, w.z(m.cell_x(c) + (a - 4.5) * 0.01, m.cell_y(r) + (b - 4.5) * 0.01));
+            }
+          }
+          if (e > hi + 0.05) {
+            ++n;
+            if (verbose) {
+              std::printf("  phantom at planning time at (%.2f, %.2f): measured %.3f, terrain up to %.3f\n",
+                m.cell_x(c), m.cell_y(r), e, hi);
+            }
+          }
+        }
+      }
+      return n;
+    };
+  int phantom_at_plan = -1;
+  long flat_pts = 0, flat_faces = 0;
   std::pair<int, int> at_plan{-1, -1};
   int observed_at_plan = 0;
   for (const auto & pose : traj) {
@@ -345,8 +405,29 @@ Result check(
     const auto t0 = std::chrono::steady_clock::now();
     m.integrate_scan(o, pts);
     ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // False face points: points on terrain that is flat for 10 cm around them.
+    const auto & faces = m.last_faces();
+    for (size_t k = 0; k < pts.size() && k < faces.size(); k += 7) {
+      const auto & q = pts[k];
+      const double zt = w.z(q.x(), q.y());
+      if (std::abs(q.z() - zt) > 0.03) {continue;}
+      bool flat = true;
+      for (int a = -2; a <= 2 && flat; ++a) {
+        for (int b = -2; b <= 2 && flat; ++b) {
+          flat = std::abs(w.z(q.x() + 0.05 * a, q.y() + 0.05 * b) - zt) < 0.005;
+        }
+      }
+      if (flat) {
+        ++flat_pts;
+        flat_faces += faces[k];
+      }
+    }
     if (pose.plan_time) {
       at_plan = plan_coverage(m, kPlans.at(sc));
+      phantom_at_plan = count_phantoms();
+      if (!map_dir.empty()) {
+        write_map(map_dir + "/lidar_map_" + sc + ".txt", m);
+      }
       observed_at_plan = 0;
       for (int i = 0; i < m.rows() * m.cols(); ++i) {
         observed_at_plan += !std::isnan(m.elevation(static_cast<size_t>(i)));
@@ -397,6 +478,23 @@ Result check(
       }
     }
   }
+  // The terrain under a cell's whole footprint (1 cm samples): a 2.5D cell may
+  // read anything from its lowest to its highest terrain (a face inside it makes
+  // either defensible), but not above or below all of it.
+  auto footprint = [&](int r, int c, double & lo, double & hi) {
+      lo = INFINITY;
+      hi = -INFINITY;
+      for (int a = 0; a < 10; ++a) {
+        for (int b = 0; b < 10; ++b) {
+          const double z = w.z(m.cell_x(c) + (a - 4.5) * 0.01, m.cell_y(r) + (b - 4.5) * 0.01);
+          lo = std::min(lo, z);
+          hi = std::max(hi, z);
+        }
+      }
+    };
+  int phantom = 0, sunken = 0;
+  double worst_phantom = 0.0, worst_sunken = 0.0;
+  std::vector<double> err_flat;  // cells whose footprint is one flat surface
   std::vector<double> err, err_all;  // away from edges; everywhere
   int n_obs = 0, false_flat = 0, false_edge = 0, missed = 0, far_err = 0, bound_viol = 0;
   int bounded = 0, unbounded_unseen = 0, finite_truth = 0, unconfirmed = 0, bound_uncovered = 0;
@@ -409,8 +507,29 @@ Result check(
       const double e = m.elevation(i);
       if (m.measured(i) && !m.confirmed(i)) {++unconfirmed;}
       if (!std::isnan(e)) {
-        if (m.flags(i)) {continue;}  // assumed or a contact: not a LiDAR measurement
+        if (m.flags(i) & (ElevationMapper::kAssumed | ElevationMapper::kContact)) {
+          continue;  // not a LiDAR measurement
+        }
         ++n_obs;
+        double lo, hi;
+        footprint(r, c, lo, hi);
+        if (e > hi + 0.05) {
+          ++phantom;
+          worst_phantom = std::max(worst_phantom, e - hi);
+          if (verbose) {
+            std::printf("  phantom at (%.2f, %.2f): measured %.3f, terrain under it %.3f..%.3f, "
+              "flags %d, hits %u\n", m.cell_x(c), m.cell_y(r), e, lo, hi, m.flags(i), m.hits(i));
+          }
+        }
+        if (e < lo - 0.05) {
+          ++sunken;
+          worst_sunken = std::max(worst_sunken, lo - e);
+          if (verbose) {
+            std::printf("  sunken at (%.2f, %.2f): measured %.3f, terrain under it %.3f..%.3f\n",
+              m.cell_x(c), m.cell_y(r), e, lo, hi);
+          }
+        }
+        if (hi - lo < 0.005) {err_flat.push_back(std::abs(e - lo));}
         const double tc = std::min(tz, kTallCap);
         const double d = e - tc;
         if (std::isfinite(tz)) {
@@ -464,10 +583,15 @@ Result check(
   fail(land_unmeasured > 0, "landing cells not measured");
   fail(arc_unknown > 0, "cells under the plan's arcs neither measured nor bounded");
 
-  std::printf("== %s (%zu scans, mapper %.1f ms/scan)\n", sc.c_str(), traj.size(), ms / traj.size());
-  std::printf("  at planning time (after the warm-up hops): %d cells usable; plan: %d landing cells "
-    "unmeasured, %d arc samples neither measured nor bounded\n", observed_at_plan, at_plan.first,
-    at_plan.second);
+  std::printf("== %s (%zu scans, mapper %.1f ms/scan; face points %.1f%%, %ld face hits ignored, "
+    "%ld raises credited to a neighbour)\n", sc.c_str(), traj.size(), ms / traj.size(),
+    100.0 * m.face_points() / std::max(1L, m.points_classified()), m.face_hits_ignored(),
+    m.hits_attributed());
+  std::printf("  points on flat terrain taken for face points: %.2f%% of %ld sampled\n",
+    100.0 * flat_faces / std::max(1L, flat_pts), flat_pts);
+  std::printf("  at planning time (after the warm-up hops): %d cells usable, %d phantom; plan: %d "
+    "landing cells unmeasured, %d arc samples neither measured nor bounded\n", observed_at_plan,
+    phantom_at_plan, at_plan.first, at_plan.second);
   std::printf("  observed %d of %d finite cells (%.0f%%); bounded unseen %d; unbounded %d; "
     "unconfirmed %d; heights cleared by rays %ld\n",
     n_obs, finite_truth, 100.0 * n_obs / std::max(1, finite_truth), bounded, unbounded_unseen,
@@ -476,6 +600,9 @@ Result check(
     "median %.3f, p95 %.3f)\n", med, p95, mx, percentile(err_all, 0.5), percentile(err_all, 0.95));
   std::printf("  > 10 cm: %d above the truth by an edge, %d above it elsewhere, %d below; "
     "%d away from edges\n", false_edge, false_flat, missed, far_err);
+  std::printf("  footprint: %d phantom (worst %.3f m above), %d sunken (worst %.3f m below); flat "
+    "cells (%zu): p95 %.3f, max %.3f m\n", phantom, worst_phantom, sunken, worst_sunken,
+    err_flat.size(), percentile(err_flat, 0.95), percentile(err_flat, 1.0));
   std::printf("  upper bounds below the terrain: %d (worst %.3f m), %d not covered by a neighbour\n",
     bound_viol, worst_bound, bound_uncovered);
   std::printf("  plan, flown: %d landing cells unmeasured, %d arc samples neither measured nor bounded\n",
@@ -495,14 +622,23 @@ Result check(
 int main(int argc, char ** argv)
 {
   std::vector<std::string> scs;
-  double pose_noise = 0.0;
-  std::string json_dir;
+  double pose_noise = 0.0, shift = 0.0;
+  bool face_filter = true, edge_attribution = true;
+  std::string json_dir, map_dir;
   bool verbose = false;
   for (int a = 1; a < argc; ++a) {
     if (!std::strcmp(argv[a], "--pose-noise") && a + 1 < argc) {
       pose_noise = std::atof(argv[++a]);
+    } else if (!std::strcmp(argv[a], "--shift") && a + 1 < argc) {
+      shift = std::atof(argv[++a]);
+    } else if (!std::strcmp(argv[a], "--no-face-filter")) {
+      face_filter = false;
+    } else if (!std::strcmp(argv[a], "--no-edge-attribution")) {
+      edge_attribution = false;
     } else if (!std::strcmp(argv[a], "--verbose")) {
       verbose = true;
+    } else if (!std::strcmp(argv[a], "--map-out") && a + 1 < argc) {
+      map_dir = argv[++a];
     } else if (!std::strcmp(argv[a], "--json") && a + 1 < argc) {
       json_dir = argv[++a];
     } else {
@@ -519,11 +655,14 @@ int main(int argc, char ** argv)
       std::printf("unknown scenario %s\n", sc.c_str());
       return 2;
     }
-    const auto r = check(sc, pose_noise, json_dir, verbose);
+    const auto r = check(sc, pose_noise, shift, face_filter, edge_attribution, map_dir, json_dir,
+      verbose);
     failures += !r.pass;
     summary.push_back(sc + ": " + (r.pass ? "pass" : "FAIL"));
   }
-  std::printf("\n== Summary (pose attitude noise %.2f deg)\n", pose_noise);
+  std::printf("\n== Summary (pose attitude noise %.2f deg, lattice shift %.3f m, face filter %s, "
+    "edge attribution %s)\n", pose_noise, shift, face_filter ? "on" : "off",
+    edge_attribution ? "on" : "off");
   for (const auto & s : summary) {std::printf("  %s\n", s.c_str());}
   std::printf("%d scenario(s) failed\n", failures);
   return failures ? 1 : 0;

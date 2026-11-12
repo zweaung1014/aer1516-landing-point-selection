@@ -16,6 +16,11 @@
 // mapper on Gazebo's pose, stage 3a). If FAST-LIO has not started by
 // release_timeout, the robot is released anyway, with an error.
 //
+// It never releases while a sensor topic (single_publisher_topics) has more
+// than one publisher: a stale lidar_sim_adapter from an earlier launch sends
+// FAST-LIO every scan and IMU sample twice, out of order, and FAST-LIO clears
+// its buffers and diverges (docs/lidar_map_quality_plan.md, Fix 1).
+//
 // While the robot flies it logs FAST-LIO's pose against Gazebo's for every
 // odometry message, to data/data_lio/lio_<stamp>.csv (scripts/lio_report.py).
 #include <cmath>
@@ -27,6 +32,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
@@ -84,6 +90,8 @@ public:
     release_timeout_ = declare_parameter("release_timeout", 30.0);  // [s, sim] after the first truth pose
     data_dir_ = declare_parameter(
       "data_dir", std::string("/home/zweminhtetaung/CrazySim/data/data_lio"));
+    single_pub_topics_ = declare_parameter("single_publisher_topics",
+      std::vector<std::string>{"/lio/points", "/lio/imu", "/lidar/points"});
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -117,6 +125,25 @@ private:
     }
   }
 
+  // "" if every topic in single_pub_topics_ has at most one publisher, else
+  // which ones do not. Re-counted at most once per wall second.
+  const std::string & duplicate_publishers()
+  {
+    const auto wall = std::chrono::steady_clock::now();
+    if (wall - dup_checked_ < std::chrono::seconds(1)) {
+      return dup_;
+    }
+    dup_checked_ = wall;
+    dup_.clear();
+    for (const auto & topic : single_pub_topics_) {
+      const size_t n = count_publishers(topic);
+      if (n > 1) {
+        dup_ += (dup_.empty() ? "" : ", ") + topic + " (" + std::to_string(n) + ")";
+      }
+    }
+    return dup_;
+  }
+
   void release(const char * why)
   {
     for (int i = 0; i < 3; ++i) {
@@ -139,6 +166,17 @@ private:
         return;  // no Gazebo pose yet (Play not pressed)
       }
       t_start_ = t_now;
+    }
+    if (!duplicate_publishers().empty()) {
+      if (!released_) {
+        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
+          "Not releasing: more than one publisher on %s. A node from an earlier launch is "
+          "still running (pgrep -af hopcopter_perception); stop it and relaunch.", dup_.c_str());
+        return;
+      }
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
+        "More than one publisher on %s: FAST-LIO and the map are getting every message twice",
+        dup_.c_str());
     }
     // Re-send the release for a second: the bridge may not have matched yet.
     if (released_ && std::chrono::steady_clock::now() - release_wall_ < std::chrono::seconds(1)) {
@@ -243,6 +281,9 @@ private:
   }
 
   std::string mode_, world_, lio_frame_, truth_frame_, data_dir_;
+  std::vector<std::string> single_pub_topics_;
+  std::string dup_;
+  std::chrono::steady_clock::time_point dup_checked_{};
   double settle_time_, release_timeout_;
   int64_t min_scans_;
   long n_odom_ = 0, n_logged_ = 0;

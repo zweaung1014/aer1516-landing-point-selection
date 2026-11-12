@@ -106,7 +106,7 @@ plus a 0.4 m wall at world x ∈ [2.5, 2.7] matching the published elevation map
 
 ```bash
 cd ~/CrazySim/ros2_ws
-ros2 launch crazyflie launch.py backend:=cflib
+ros2 launch crazyflie launch.py backend:=cflib gui:=False
 ```
 
 ### Terminal 3 — IMU Bridge
@@ -164,7 +164,7 @@ ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 
 ### Other worlds
 
-Five more worlds mirror the maps in `hopcopter-ballistic-planning/maps/`. Each Gazebo world
+Four more worlds mirror the maps in `hopcopter-ballistic-planning/maps/`. Each Gazebo world
 (Terminal 1, `-w`) has a matching elevation map scenario (Terminal 5); run the two together.
 Each map is shifted so its Python `START` sits at world (0, 0), where the robot spawns, so
 Terminal 1 keeps `-x 0 -y 0`. The goal is the Python `GOAL` in world coordinates.
@@ -172,7 +172,6 @@ Terminal 1 keeps `-x 0 -y 0`. The goal is the Python `GOAL` in world coordinates
 | World | Terminal 1 `-w` | Terminal 5 `--ros-args -p scenario:=` | Goal (x, y) |
 |---|---|---|---|
 | Stairs | `crazysim_stairs` | `stairs` | (4.0, −2.0) |
-| Stairs with curbs | `crazysim_stairs_with_curb` | `stairs_with_curb` | (4.0, 0.0) |
 | 30° slope | `crazysim_slope_30deg` | `slope_30deg` | (4.25, −2.0) |
 | Cliff gap | `crazysim_cliff_gap` | `cliff_gap` | (9.5, 0.5) |
 | Maze | `crazysim_maze` | `maze` | (14.0, 0.0) |
@@ -194,20 +193,6 @@ ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scen
 # Goal
 ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 "{header: {frame_id: 'world'}, pose: {position: {x: 4.0, y: -2.0, z: 0.0}, orientation: {w: 1.0}}}"
-```
-
-#### Stairs with curbs
-
-```bash
-# Terminal 1 (in ~/CrazySim/crazyflie-firmware)
-bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_stairs_with_curb
-
-# Terminal 5 (in ~/CrazySim/ros2_ws)
-ros2 run elevation_map_publisher elevation_map_publisher_node --ros-args -p scenario:=stairs_with_curb
-
-# Goal
-ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
-"{header: {frame_id: 'world'}, pose: {position: {x: 4.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
 ```
 
 #### 30° slope
@@ -294,7 +279,7 @@ Consecutive pads are 1.9 m apart in x, so two pads in one column are 2.8 m apart
 longest hop. The plan zigzags start → L1 → R1 → L2 → R2 → L3 → R3 → C → goal: 9 hops of 0.8–2.3 m
 with landing tilts up to 19°. It plans in about 4 s.
 
-`stairs`, `stairs_with_curb` and `cliff_gap` are edited from the Python maps so the planner can
+`stairs` and `cliff_gap` are edited from the Python maps so the planner can
 plan them for the robot (see `CHANGELOG.md`); `slope_30deg` and `maze` match them. The maze's
 poles sit in a 3 m corridor between two side walls, and its 0.5 m wall spans the full width, so
 the robot has to hop among the poles and over the wall rather than around them. `cliff_gap` takes
@@ -324,6 +309,12 @@ source ~/fastlio_ws/install/setup.bash
 cd ~/CrazySim/ros2_ws && colcon build && source install/setup.bash
 ```
 
+**Before each launch**, make sure nothing from an earlier run is still running:
+`pgrep -af hopcopter_perception` must print nothing (stop leftovers with `pkill -f
+hopcopter_perception`). A leftover `lidar_sim_adapter` sends FAST-LIO every scan twice, and its
+pose diverges. `lio_anchor` refuses to release the robot while a sensor topic has two publishers,
+and the mapper warns above 11 scans/s.
+
 **Five terminals** (each sourced as above):
 
 ```bash
@@ -332,7 +323,7 @@ cd ~/CrazySim/crazyflie-firmware
 bash tools/crazyflie-simulation/simulator_files/gazebo/launch/sitl_singleagent.sh -m crazyflie -x 0 -y 0 -w crazysim_low_wall -H
 
 # 2. cflib server
-cd ~/CrazySim/ros2_ws && ros2 launch crazyflie launch.py backend:=cflib
+cd ~/CrazySim/ros2_ws && ros2 launch crazyflie launch.py backend:=cflib gui:=False
 
 # 3. The LiDAR pipeline: bridges, adapter, FAST-LIO, anchor, mapper, known map (replaces Terminals 3-5)
 ros2 launch hopcopter_perception lidar_mapping.launch.py scenario:=low_wall

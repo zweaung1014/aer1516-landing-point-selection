@@ -94,6 +94,10 @@ public:
     data_dir_ = declare_parameter(
       "data_dir", std::string("/home/zweminhtetaung/CrazySim/data/data_elevation_map"));
     missed_obstacle_height_ = declare_parameter("score.missed_obstacle_height", 1.0);
+    // The LiDAR runs at 10 Hz. More scans than this per second of scan time, or a
+    // scan not newer than the last, means a second publisher on the cloud topic
+    // (a node left over from an earlier launch): warn (docs/lidar_map_quality_plan.md).
+    max_scan_rate_ = declare_parameter("max_scan_rate", 11.0);
 
     MapperParams d;
     p_.resolution = declare_parameter("map.resolution", d.resolution);
@@ -126,6 +130,16 @@ public:
     p_.require_top_confirmation = declare_parameter("confirm.require", d.require_top_confirmation);
     p_.confirm_margin = declare_parameter("confirm.margin", d.confirm_margin);
     p_.start_disk_radius = declare_parameter("start_disk_radius", d.start_disk_radius);
+    // Face points and edge attribution (docs/lidar_map_quality_plan.md, Fix 2).
+    p_.face_filter = declare_parameter("face.filter", d.face_filter);
+    p_.face_min_dz = declare_parameter("face.min_dz", d.face_min_dz);
+    p_.face_max_dz = declare_parameter("face.max_dz", d.face_max_dz);
+    p_.face_radius = declare_parameter("face.radius", d.face_radius);
+    p_.face_min_slope = declare_parameter("face.min_slope", d.face_min_slope);
+    p_.edge_attribution = declare_parameter("edge.attribution", d.edge_attribution);
+    p_.edge_sigmas = declare_parameter("edge.sigmas", d.edge_sigmas);
+    p_.edge_min_support = static_cast<int>(
+      declare_parameter("edge.min_support", static_cast<int64_t>(d.edge_min_support)));
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -230,6 +244,32 @@ private:
     }
   }
 
+  void checkScanRate(const rclcpp::Time & stamp)
+  {
+    const double t = stamp.seconds();
+    if (!scan_times_.empty() && t <= scan_times_.back()) {
+      if (++n_out_of_order_ % 20 == 1) {
+        RCLCPP_WARN(get_logger(), "Scan at %.3f s is not newer than the last (%.3f s): %ld so far. "
+          "Is a second node publishing %s?", t, scan_times_.back(), n_out_of_order_,
+          cloud_topic_.c_str());
+      }
+    }
+    scan_times_.push_back(t);
+    while (!scan_times_.empty() && scan_times_.front() < t - 2.0) {
+      scan_times_.pop_front();
+    }
+    const double span = t - scan_times_.front();
+    if (span >= 1.5) {
+      const double rate = (scan_times_.size() - 1) / span;
+      const auto wall = std::chrono::steady_clock::now();
+      if (rate > max_scan_rate_ && wall - last_rate_warn_ > std::chrono::seconds(5)) {
+        last_rate_warn_ = wall;
+        RCLCPP_WARN(get_logger(), "%.1f scans/s on %s (expected ~10): is a second node publishing "
+          "it? (pgrep -af hopcopter_perception)", rate, cloud_topic_.c_str());
+      }
+    }
+  }
+
   void processClouds()
   {
     if (!mapper_) {
@@ -261,6 +301,7 @@ private:
           pts_.push_back(T_cloud * Eigen::Vector3d(*ix, *iy, *iz));
         }
       }
+      checkScanRate(stamp);
       mapper_->integrate_scan(T_sensor.translation(), pts_);
       const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
@@ -313,9 +354,12 @@ private:
     if (n_published_ % static_cast<long>(std::max(1.0, 10.0 * publish_rate_)) == 0) {
       RCLCPP_INFO(get_logger(),
         "%ld scans (%.1f ms mean, %.1f max), %ld contacts, %ld dropped without TF, %ld heights "
-        "cleared by rays, %ld rays through surfaces dropped", m.scans(),
+        "cleared by rays, %ld rays through surfaces dropped; face points %.1f%% (%ld hits ignored), "
+        "%ld raises credited to a neighbour", m.scans(),
         scan_ms_sum_ / std::max(1L, m.scans()), scan_ms_max_, n_contacts_, n_no_tf_,
-        m.heights_cleared(), m.rays_through_surfaces());
+        m.heights_cleared(), m.rays_through_surfaces(),
+        100.0 * m.face_points() / std::max(1L, m.points_classified()), m.face_hits_ignored(),
+        m.hits_attributed());
     }
   }
 
@@ -348,7 +392,7 @@ private:
         finite += std::isfinite(k);
         const double e = m.elevation(i);
         if (!std::isnan(e)) {
-          if (m.flags(i)) {
+          if (m.flags(i) & (ElevationMapper::kAssumed | ElevationMapper::kContact)) {
             continue;  // assumed or a contact, not a LiDAR measurement
           }
           ++usable;
@@ -378,7 +422,8 @@ private:
       score_csv_.open(data_dir_ + "/score_" + run_stamp_ + ".csv");
       score_csv_ << "stamp,scans,contacts,usable,known_finite,coverage,bounded_unseen,unbounded,"
         "err_median,err_p95,err_max,err_mean,false_flat,false_edge,missed,bound_violations,"
-        "heights_cleared,scan_ms_mean,scan_ms_max\n";
+        "heights_cleared,scan_ms_mean,scan_ms_max,face_points_pct,face_hits_ignored,"
+        "raises_credited\n";
       RCLCPP_INFO(get_logger(), "Scoring against %s: %s/score_%s.csv", known_topic_.c_str(),
         data_dir_.c_str(), run_stamp_.c_str());
     }
@@ -389,7 +434,9 @@ private:
                << percentile(err, 1.0) << "," << (err.empty() ? NAN : signed_sum / err.size()) << ","
                << false_flat << "," << false_edge << "," << missed << "," << bound_viol << ","
                << m.heights_cleared() << "," << scan_ms_sum_ / std::max(1L, m.scans()) << ","
-               << scan_ms_max_ << "\n";
+               << scan_ms_max_ << ","
+               << 100.0 * m.face_points() / std::max(1L, m.points_classified()) << ","
+               << m.face_hits_ignored() << "," << m.hits_attributed() << "\n";
     score_csv_.flush();
   }
 
@@ -438,7 +485,10 @@ private:
   std::vector<Eigen::Vector3d> pts_;
   rclcpp::Time last_stamp_{0, 0, RCL_ROS_TIME};
   long n_no_tf_ = 0, n_dropped_ = 0, n_contacts_ = 0, n_published_ = 0, n_snapshots_ = 0;
-  double scan_ms_sum_ = 0.0, scan_ms_max_ = 0.0;
+  double scan_ms_sum_ = 0.0, scan_ms_max_ = 0.0, max_scan_rate_ = 11.0;
+  std::deque<double> scan_times_;  // [s] stamps of the scans of the last 2 s
+  long n_out_of_order_ = 0;
+  std::chrono::steady_clock::time_point last_rate_warn_{};
   std::chrono::steady_clock::time_point last_snapshot_ = std::chrono::steady_clock::now();
   std::ofstream score_csv_;
 

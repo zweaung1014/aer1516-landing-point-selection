@@ -311,6 +311,21 @@
     was later redesigned; see "Changed".)
 
 ### Changed
+- **On a LiDAR map a step counts as an edge from 0.153 m per cell** (`standable.lidar_steep_noise`
+  0 → 0.02, in `ballistic_planner_node`, `ballistic_plan_check` and hopcopter's clearance re-check,
+  `lidar_steep_noise`). The 60° rule makes an edge of a jump over 0.173 m per cell, and the stairs'
+  0.18 m risers sat 7 mm over it. The LiDAR map measures them right (median 0.180 m on the
+  2026-11-11 stairs run) but each riser's height spreads ±10 mm, so 4 in 10 of the near risers fell
+  under the line, read as a slope, and their cells became landable: the planner landed on the
+  first 10 cm of each tread, at the riser's edge. With 0.02 the near risers that were mere
+  near-misses (22 of 136 in that run) are edges again; offline (a replay of the run's trajectory) the
+  near risers caught go from 84% (robot at the bottom) and 64% (after climbing) to 95% and 99%. The slope stays a slope: 0.058 m per cell, 0.107 m at most
+  on that run's LiDAR map, no false edges at 0.02 on the stairs or the slope. On
+  `ballistic_plan_check --lidar-maps` the stairs plan now lands mid-tread (1.15, 1.45, 1.75,
+  2.05) instead of at each riser (1.05, 1.35, 1.65, 1.95). Not fixed: risers the mapper reads 4–19
+  cm short because stray face points take over a cell (31 of the 136, and every far riser seen
+  from below); the stairs' LiDAR-map case still fails on one such cell, as it did at 0. The
+  "2 cm noise" comparison in `ballistic_plan_check` is gone (now the node's defaults).
 - **The mapper no longer lets a vertical face set a floor's height** (docs/lidar_map_quality_plan.md,
   Fix 2). A face (a riser, a pole's side, a wall) usually sits on a cell border, and the 2 cm range
   noise scattered its points into the floor cell in front, which "a higher hit replaces" handed

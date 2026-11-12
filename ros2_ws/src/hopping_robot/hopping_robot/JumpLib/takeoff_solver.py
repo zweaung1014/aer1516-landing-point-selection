@@ -331,10 +331,11 @@ class HopModel:
 
 # ---- clearance re-check (the planner's test, on the controller's copy of the map) ----
 
-def steep_mask(grid, res, min_grade=math.tan(math.radians(60.0))):
+def steep_mask(grid, res, min_grade=math.tan(math.radians(60.0)), steep_noise=0.0):
     """The planner's terrain edges (Map2D5::steep_mask): both cells of every 8-neighbour pair whose
-    heights differ by more than min_grade times their distance, and every NaN (obstacle) cell and
-    its neighbours."""
+    heights differ by more than min_grade times their distance less steep_noise (the planner's
+    standable.lidar_steep_noise on a LiDAR map, 0 on a hand-made one), and every NaN (obstacle)
+    cell and its neighbours."""
     obs = ~np.isfinite(grid)
     z = np.where(obs, 0.0, grid)
     mask = obs.copy()
@@ -343,7 +344,7 @@ def steep_mask(grid, res, min_grade=math.tan(math.radians(60.0))):
         dist = res * math.hypot(di, dj)
         ia = (slice(0, nx - di), slice(max(0, -dj), ny - max(0, dj)))
         ib = (slice(di, nx), slice(max(0, dj), ny - max(0, -dj)))
-        steep = (np.abs(z[ib] - z[ia]) > min_grade * dist) | obs[ia] | obs[ib]
+        steep = (np.abs(z[ib] - z[ia]) > min_grade * dist - steep_noise) | obs[ia] | obs[ib]
         mask[ia] |= steep
         mask[ib] |= steep
     return mask
@@ -359,12 +360,12 @@ def composed_terrain(elevation, upper_bound=None):
     return np.where(np.isfinite(elevation), elevation, upper_bound)
 
 
-def dilate(grid, res, radius, steep_grade=math.tan(math.radians(60.0))):
+def dilate(grid, res, radius, steep_grade=math.tan(math.radians(60.0)), steep_noise=0.0):
     """The planner's inflated field (Map2D5::inflated_field): the highest terrain edge (steep_mask)
     within radius of each cell, never below the cell's own ground; NaN cells count as +inf. Only
     edges spread, so a slope gentler than steep_grade keeps its own height."""
     filled = np.where(np.isfinite(grid), grid, np.inf)
-    src = np.where(steep_mask(grid, res, steep_grade), filled, -np.inf)
+    src = np.where(steep_mask(grid, res, steep_grade, steep_noise), filled, -np.inf)
     reach = radius + res * math.sqrt(2.0) / 2.0      # the planner's lookup pad
     n = int(math.ceil(reach / res))
     out = np.full(src.shape, -np.inf)

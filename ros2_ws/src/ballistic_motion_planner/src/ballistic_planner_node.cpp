@@ -140,12 +140,14 @@ public:
     // landing miss (a landing 0.15 m short on a wall's top, next to its unseen shadow, went
     // over the wall's front edge, 2026-11-07)
     unseen_margin_ = declare_parameter("standable.unseen_margin", 0.3);
-    // An edge is steeper than steep_grade (60 deg, 0.173 m per cell) less this much. It was
-    // 0.08 while the mapper spread a step over two cells (2026-11-07); the face-point filter
-    // ended that (docs/lidar_map_quality_plan.md, Fix 2). Note the stairs' 0.18 m risers are
-    // only 7 mm over the threshold: one mapped 1 cm low is no edge, and a tread's first cell
-    // becomes landable (0.02 keeps them edges).
-    lidar_steep_noise_ = declare_parameter("standable.lidar_steep_noise", 0.0);
+    // An edge is steeper than steep_grade (60 deg, 0.173 m per cell) less this much: 0.02 makes
+    // it a jump over 0.153 m per cell. It was 0.08 while the mapper spread a step over two cells
+    // (2026-11-07); the face-point filter ended that (docs/lidar_map_quality_plan.md, Fix 2).
+    // At 0 the stairs' 0.18 m risers sat 7 mm over the threshold, and the mapper's per-cell
+    // spread (±10 mm on a riser's height, 2026-11-11 stairs run) left 4 in 10 of the near ones
+    // no edge. The slope's steepest measured jump is 0.107 m. hopcopter's clearance re-check
+    // (lidar_steep_noise) must match.
+    lidar_steep_noise_ = declare_parameter("standable.lidar_steep_noise", 0.02);
     replan_enabled_ = declare_parameter("replan.enabled", true);
     replan_interval_ = declare_parameter("replan.min_interval", 5.0);       // [s]
     replan_height_tol_ = declare_parameter("replan.height_tolerance", 0.05);  // [m]
@@ -1018,7 +1020,7 @@ private:
   double goal_x_ = 0.0, goal_y_ = 0.0;
   bool have_goal_ = false, goal_reached_ = false, map_changed_ = false;
   int failed_plans_ = 0;
-  double lidar_edge_margin_ = 0.1, unseen_margin_ = 0.3, lidar_steep_noise_ = 0.0;
+  double lidar_edge_margin_ = 0.1, unseen_margin_ = 0.3, lidar_steep_noise_ = 0.02;
   double lidar_edge_min_drop_ = 0.3;
   ActivePlan active_;
   ReplanState replan_state_ = ReplanState::kIdle;

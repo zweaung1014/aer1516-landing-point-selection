@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 from hopping_robot.JumpLib.takeoff_solver import (LIFT_DT, LIFT_TILT, HopModel, clearance_apex,
-                                                  composed_terrain, dilate, tilt_of, unit)
+                                                  composed_terrain, dilate, steep_mask, tilt_of,
+                                                  unit)
 
 M = HopModel()
 UP = np.array([0.0, 0.0, 1.0])
@@ -205,6 +206,25 @@ def test_dilate():
     g = grid.copy()
     g[10, 10] = np.nan                         # an obstacle cell is never cleared
     assert dilate(g, res, 0.33)[12, 10] == np.inf
+
+
+def test_dilate_lidar_steep_noise():
+    """On a LiDAR map an edge is a jump over 60 deg less the planner's lidar_steep_noise (0.153 m
+    per cell at 0.02): a 0.16 m step mapped from a 0.18 m riser is still an edge and spreads, while
+    without the allowance it is a slope and keeps its own height. A 30 deg slope (0.058 m per
+    cell) is no edge either way."""
+    res = 0.1
+    xs = -0.5 + (np.arange(50) + 0.5) * res
+    step = np.zeros((50, 50))
+    step[xs >= 2.0 - 1e-9, :] = 0.16
+    exact = dilate(step, res, 0.18)
+    lidar = dilate(step, res, 0.18, steep_noise=0.02)
+    assert np.all(exact == step)
+    assert np.all(lidar[(xs > 1.8) & (xs < 2.0)] == 0.16)
+    assert np.all(lidar[xs < 1.8] == 0.0)
+    assert np.all(steep_mask(step, res, steep_noise=0.02)[(xs > 1.9) & (xs < 2.1)])
+    slope = np.tile((np.tan(math.radians(30.0)) * np.clip(xs - 1.0, 0.0, None))[:, None], (1, 50))
+    assert not steep_mask(slope, res, steep_noise=0.02).any()
 
 
 def test_dilate_spreads_only_edges():

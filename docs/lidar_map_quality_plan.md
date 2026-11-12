@@ -11,12 +11,16 @@ stalled beside a pole). Two problems, fixed in this order.
   (dips to 0.67) with the GUI; low_wall fell at 0.67 and cleared the wall when the sim was not
   slow. Open: the body's roll/pitch jiggles in flight.
 - **Fix 2 done offline, not yet flown.** Face points, edge attribution, face-only cells
-  published unseen (CHANGELOG, Changed). Planner: `lidar_steep_noise` 0, the 0.1 m edge margin
+  published unseen (CHANGELOG, Changed). Planner: `lidar_steep_noise` 0 (0.02 since 2026-11-11), the 0.1 m edge margin
   only at drops ≥ 0.3 m (rims seen from above still read a cell wide; see below). On
   `mapper_check`'s planning-time maps the stairs plan climbs the stairs instead of going around.
   - Open: on the aligned lattice the frontier cell on tread 6 reads 10 cm high (seen at 10°).
-  - Decide: the stairs' 0.18 m risers are 7 mm over the 60° threshold, so one mapped 1 cm low is
-    no edge and a landing can come 5 cm past a riser; `standable.lidar_steep_noise` 0.02 fixes it.
+    Diagnosed 2026-11-11: face points the filter misses (the middle of three rings 1.7–1.9 m
+    away, 4.5–5 cm apart, under `face.min_dz`) outnumber a far tread's few ground hits and drag
+    the cells beside each riser up or down its face.
+  - Done 2026-11-11: the stairs' 0.18 m risers were 7 mm over the 60° threshold, so one mapped 1 cm
+    low was no edge and a landing could come 5 cm past a riser; `standable.lidar_steep_noise` is now
+    0.02 (planner and hopcopter).
   - Changed from the plan: step 4 left the edge margin at big drops (a rim seen from above is
     uncertain by a cell, and the "wall widened by face hits" case lands on the wall without it).
 

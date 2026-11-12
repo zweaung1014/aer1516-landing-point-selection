@@ -213,6 +213,9 @@ class hopcopter(Node):
         self.bottom_clearance = 0.2   # the planner's bottom_clearance
         self.side_clearance = 0.03    # the planner's side_clearance
         self.robot_radius = 0.15      # the body to the propeller tips
+        # On a LiDAR map an edge is a jump over 60 deg less this much (0.153 m per cell): the
+        # planner's standable.lidar_steep_noise. A hand-made map keeps the exact 60 deg.
+        self.lidar_steep_noise = 0.02
         self.apex_clear_margin = 0.01
         # Terrain constrains an arc only where it is this far above both ends: the planner's
         # clearance.active_tolerance (robot_params()); a LiDAR map's flat ground is a few mm rough
@@ -593,7 +596,9 @@ class hopcopter(Node):
                 bound = self._emap_bound.reshape(ncols, nrows)[np.ix_(cb, rb)].T[::-1, ::-1]
                 grid = composed_terrain(grid, bound)
             self._emap_grid = grid
-            self._emap_field = dilate(grid, self._emap_res, self.robot_radius + self.side_clearance)
+            noise = self.lidar_steep_noise if self._emap_lidar else 0.0
+            self._emap_field = dilate(grid, self._emap_res,
+                                      self.robot_radius + self.side_clearance, steep_noise=noise)
             self._emap_origin = (self._emap_cx - 0.5 * nrows * self._emap_res,
                                  self._emap_cy - 0.5 * ncols * self._emap_res)
         except Exception as e:

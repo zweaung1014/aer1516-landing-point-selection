@@ -84,7 +84,7 @@ contain the stock ament flake8/pep257/copyright linters, plus hopping_robot's
 `cd ros2_ws/src/hopping_robot && /usr/bin/python3 -B -m pytest -p no:cacheprovider test/test_waypoint_tracker.py test/test_push_controller.py test/test_takeoff_solver.py test/test_touchdown.py`.
 They cover waypoint decisions, the braking tilt guard, the push cutoff, and the takeoff solve
 (each solved hop lands on its target, also under an independent step integration; the guards; the
-clearance re-check, also on a LiDAR map's composed field), 87 tests in all. The planner has two
+clearance re-check, also on a LiDAR map's composed field and with its edge allowance), 88 tests in all. The planner has two
 offline executables (no ROS graph): `ros2 run ballistic_motion_planner ballistic_parity_test`
 (the reference search against the Python port; its output must stay byte-identical) and
 `ballistic_plan_check` (the momentum-aware search on 15 cases: landing tilts, the expected plans,
@@ -258,7 +258,10 @@ CHANGELOG.md the reasons for its parameters):
     hopcopter) but never a landing;
   - an unseen, unbounded cell is OBSTACLE;
   - landings keep 0.3 m from unseen cells, and 0.1 m further from steep edges that drop 0.3 m or
-    more (none on the stairs); an edge is a jump steeper than 60°, as on a hand-made map;
+    more (none on the stairs);
+  - an edge is a jump over 0.153 m per cell: 60° less `standable.lidar_steep_noise` (0.02), in the
+    planner and in hopcopter's clearance re-check, so the stairs' 0.18 m risers stay edges under
+    the map's noise. A hand-made map keeps the exact 60° (0.173 m);
   - a hand-made map (no layer) keeps every finite cell landable.
 
   On a LiDAR map the planner also refuses an unmeasured start, makes frontier plans to goals not
@@ -311,7 +314,8 @@ and controller work in the world frame) but is kept for RViz and legacy consumer
   are not `PlannerParams`' defaults (the reference planner's, for `ballistic_parity_test`, where
   one gate serves as both clearances). Change a node default in `robot_params()`, and keep the
   parity test's configuration as it is. hopcopter's `robot_radius`, `bottom_clearance` and
-  `side_clearance` (its clearance re-check) must match `robot_params()`.
+  `side_clearance` (its clearance re-check) must match `robot_params()`, and its
+  `lidar_steep_noise` the node's `standable.lidar_steep_noise`.
 - **The SITL firmware and Gazebo plugin are built binaries.** `cf2` and
   `libgz_crazysim_plugin.so` live in `crazyflie-firmware/sitl_make/build` (gitignored); after
   changing firmware or plugin source, run `make -C crazyflie-firmware/sitl_make/build`. In

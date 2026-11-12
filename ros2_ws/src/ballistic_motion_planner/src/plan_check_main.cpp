@@ -208,7 +208,7 @@ void print_plan(const Run & r, const PlannerParams & p)
   std::printf("  stop tilt %.1f deg\n", deg(r.stances.back().tilt));
 }
 // The node's standable.* defaults (ballistic_planner_node.cpp): keep them equal.
-constexpr double kLidarEdgeMargin = 0.1, kUnseenMargin = 0.3, kLidarSteepNoise = 0.0;
+constexpr double kLidarEdgeMargin = 0.1, kUnseenMargin = 0.3, kLidarSteepNoise = 0.02;
 constexpr double kLidarEdgeMinDrop = 0.3;
 
 // ---- Plans on LiDAR maps the mapper built (docs/lidar_map_quality_plan.md, Fix 2) ----
@@ -600,18 +600,14 @@ int main(int argc, char ** argv)
     const LidarMargins before{"before Fix 2", 0.1, 0.3, 0.08, 0.0};
     const LidarMargins now{"node defaults", kLidarEdgeMargin, kUnseenMargin, kLidarSteepNoise,
       kLidarEdgeMinDrop};
-    // For comparison: the 60 deg rule with 2 cm of measurement noise allowed (a jump
-    // over 0.153 m per cell is an edge): the stairs' 0.18 m risers sit 7 mm over the
-    // threshold, and a riser mapped 1 cm low stops being an edge.
-    const LidarMargins noise{"2 cm noise", kLidarEdgeMargin, kUnseenMargin, 0.02, kLidarEdgeMinDrop};
     const PlannerParams p = ballistic::robot_params();
     std::printf("\n== Plans on mapper_check's LiDAR maps (%s)\n", lidar_dir.c_str());
     for (const auto & sc : {"flat", "low_wall", "stairs", "slope_30deg", "maze",
         "cliff_gap", "lilypads", "slanted_pads"})
     {
       const std::string file = lidar_dir + "/lidar_map_" + sc + ".txt";
-      const LidarMargins sets[] = {before, now, noise};
-      for (int k = 0; k < 3; ++k) {
+      const LidarMargins sets[] = {before, now};
+      for (int k = 0; k < 2; ++k) {
         const LidarMargins & mg = sets[k];
         const auto m = load_lidar_map(file, mg);
         if (!m) {
